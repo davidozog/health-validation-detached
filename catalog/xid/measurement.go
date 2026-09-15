@@ -14,8 +14,11 @@ const (
 	SignalXidCounts        = "xid_counts"
 	SignalFatalXidCounts   = "fatal_xid_counts"
 	SignalSubXidCodeCounts = "sub_xid_code_counts"
-	SignalSince            = "since"
-	SignalEventCount       = "event_count"
+	// SignalRecoveryActionCounts is derived rather than stored; see
+	// [XidMeasurement.DerivedSignals].
+	SignalRecoveryActionCounts = "recovery_action_counts"
+	SignalSince                = "since"
+	SignalEventCount           = "event_count"
 )
 
 // MeasurementSignals lists every signal an XidMeasurement carries.
@@ -27,6 +30,7 @@ var MeasurementSignals = []string{
 	SignalXidCounts,
 	SignalFatalXidCounts,
 	SignalSubXidCodeCounts,
+	SignalRecoveryActionCounts,
 	SignalSince,
 	SignalEventCount,
 }
