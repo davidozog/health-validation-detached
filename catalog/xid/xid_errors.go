@@ -264,7 +264,7 @@ var warningClasses = []warningClass{
 // sensor and tests its xid_counts map. Codes whose immediate action is
 // IGNORE/empty, and Unused codes, are not represented and never fire.
 func Checks() []health.CheckDefinition {
-	checks := make([]health.CheckDefinition, 0, len(criticalXids)+len(nvlink5Xids)+len(nvlink5SubXidCodes)+2)
+	checks := make([]health.CheckDefinition, 0, len(criticalXids)+len(nvlink5Xids)+len(nvlink5SubXidCodes)+3)
 	for _, c := range criticalXids {
 		checks = append(checks, criticalCheck(c))
 	}
@@ -274,7 +274,7 @@ func Checks() []health.CheckDefinition {
 	for _, c := range nvlink5SubXidCodes {
 		checks = append(checks, nvlink5SubXidCodeCheck(c))
 	}
-	checks = append(checks, warningCheck(), xid154Check())
+	checks = append(checks, warningCheck(), xid154Check(), nvlink5ResolutionCheck())
 	return checks
 }
 
@@ -415,6 +415,50 @@ func xid154Check() health.CheckDefinition {
 		Severity:   health.Info,
 		Message:    "GPU Xid 154 (GPU recovery action changed) observed. Informational; correlate with the accompanying Xid.",
 	}}
+	return def
+}
+
+// nvlink5ResolutionCheck reports NVLink5 (Xid 144-150) faults by the
+// immediate action NVIDIA's decode table calls for, rather than by the
+// Fatal/Nonfatal flag NVRM stamps on the log line.
+//
+// This is additive to the per-code gpu_xid_144..150 checks, and it can
+// legitimately disagree with them: those fire on any occurrence, while
+// roughly half the table's rows resolve to IGNORE, which produces no rule
+// here and so reports PASS. A fault the table says to ignore is exactly
+// what this check exists not to escalate.
+//
+// There is deliberately no rule for IGNORE. See [NVLink5ResolutionCounts]
+// for how a row that defers to Xid 154 is resolved, and for the two
+// buckets that record why a deferral could not be.
+func nvlink5ResolutionCheck() health.CheckDefinition {
+	def := baseCheck(
+		"gpu_xid_nvlink5_resolution",
+		"GPU NVLink5 Fault Resolution",
+		"Reports NVLink5 (Xid 144-150) faults by the immediate action NVIDIA's Xid 144-150 decode table calls for, resolving rows that defer to Xid 154 through the recovery action the driver reported for that same GPU.",
+		health.NoAction,
+	)
+	def.RequiredSignals = []string{SignalNVLink5ResolutionCounts}
+	def.Rules = []health.Rule{
+		{
+			Expression:        fmt.Sprintf("%q in nvlink5_resolution_counts", ResolutionResetGPU),
+			Severity:          health.Critical,
+			Message:           "NVLink5 fault resolving to a GPU reset detected (Xid 144-150), either from NVIDIA's decode table directly or through the accompanying Xid 154.",
+			RecommendedAction: resetAndService(),
+		},
+		{
+			Expression:        fmt.Sprintf("%q in nvlink5_resolution_counts", ResolutionXid154Unrecognized),
+			Severity:          health.Warning,
+			Message:           "NVLink5 fault resolved through an Xid 154 reporting a recovery action this catalog does not recognize. Treat the fault as unresolved and report the action code.",
+			RecommendedAction: health.Drain(health.RemediationActionServiceRequired),
+		},
+		{
+			Expression:        fmt.Sprintf("%q in nvlink5_resolution_counts", ResolutionXid154Missing),
+			Severity:          health.Warning,
+			Message:           "NVLink5 fault whose resolution defers to Xid 154, but no Xid 154 was observed for the affected GPU. NVIDIA records that linkage from CUDA 12.7 / driver R565; on an older driver the required action cannot be determined from the log alone.",
+			RecommendedAction: health.Drain(health.RemediationActionServiceRequired),
+		},
+	}
 	return def
 }
 

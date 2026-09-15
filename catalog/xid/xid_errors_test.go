@@ -11,12 +11,23 @@ import (
 	"github.com/dsx-ai-factory/health-validation/catalog/xid"
 )
 
-func xidCatalog(t *testing.T) *catalog.Catalog {
+// hostCatalog builds the Xid catalog for a host running driverVersion,
+// the way the app hands the version it discovers to the catalog.
+func hostCatalog(t *testing.T, driverVersion string) *catalog.Catalog {
 	t.Helper()
-	cat := catalog.NewEmpty(
+	v, ok := health.ParseDriverVersion(driverVersion)
+	if !ok {
+		t.Fatalf("ParseDriverVersion(%q) failed", driverVersion)
+	}
+	return xidCatalog(t, catalog.WithDriverVersion(v))
+}
+
+func xidCatalog(t *testing.T, opts ...catalog.Option) *catalog.Catalog {
+	t.Helper()
+	cat := catalog.NewEmpty(append([]catalog.Option{
 		catalog.WithArchitecture("GB200"),
 		catalog.WithExecutionContext(health.OperatorInfra),
-	)
+	}, opts...)...)
 	for _, cd := range xid.Checks() {
 		cat.MustRegister(cd)
 	}
