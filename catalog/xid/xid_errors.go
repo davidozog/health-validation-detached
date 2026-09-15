@@ -299,7 +299,13 @@ func nvlink5Check(c nvlink5Xid) health.CheckDefinition {
 			RecommendedAction: resetAndService(),
 		},
 		{
-			Expression: fmt.Sprintf("%d in xid_counts", c.code),
+			// Every rule whose expression matches contributes its
+			// message, so this one has to exclude the Fatal case
+			// explicitly rather than relying on the rule above winning.
+			// Without the exclusion a Fatal occurrence matches both and
+			// the verdict carries a "(Nonfatal)" message alongside the
+			// "(Fatal)" one, contradicting itself.
+			Expression: fmt.Sprintf("(%d in xid_counts) && !(%d in fatal_xid_counts)", c.code, c.code),
 			Severity:   health.Warning,
 			Message:    fmt.Sprintf("GPU Xid %d detected: %s (Nonfatal).", c.code, c.description),
 		},

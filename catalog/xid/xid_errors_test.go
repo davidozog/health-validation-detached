@@ -1,6 +1,7 @@
 package xid_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/dsx-ai-factory/health-validation/catalog"
@@ -284,5 +285,50 @@ func TestXidErrors_PerCodeCriticalCheck(t *testing.T) {
 	}
 	if want := health.Drain(health.RemediationActionResetGPU, health.RemediationActionServiceRequired); !critical[0].RecommendedAction.Equal(want) {
 		t.Errorf("RecommendedAction = %v, want %v", critical[0].RecommendedAction, want)
+	}
+}
+
+// TestXidErrors_NVLink5_FatalDoesNotAlsoReportNonfatal guards the
+// exclusion in the Nonfatal rule. Rules are not first-match-wins: every
+// rule whose expression matches contributes its message, and a Fatal
+// occurrence is in xid_counts as well as fatal_xid_counts. Without the
+// exclusion the verdict carries both messages, telling a reader the same
+// fault is Fatal and Nonfatal. Severity stays CRITICAL either way, so
+// asserting on severity alone would not catch this.
+func TestXidErrors_NVLink5_FatalDoesNotAlsoReportNonfatal(t *testing.T) {
+	nv, err := xidCatalog(t).EvaluateAll(nvlink5MeasurementFor(146, true))
+	if err != nil {
+		t.Fatalf("EvaluateAll: %v", err)
+	}
+	v, ok := checkResult(nv, "gpu_xid_146")
+	if !ok {
+		t.Fatalf("gpu_xid_146 verdict not found")
+	}
+
+	if len(v.Messages) != 1 {
+		t.Errorf("Messages = %q, want exactly one", v.Messages)
+	}
+	for _, msg := range v.Messages {
+		if strings.Contains(msg, "(Nonfatal)") {
+			t.Errorf("Fatal occurrence reported as Nonfatal: %q", msg)
+		}
+	}
+}
+
+func TestXidErrors_NVLink5_NonfatalStillReports(t *testing.T) {
+	nv, err := xidCatalog(t).EvaluateAll(nvlink5MeasurementFor(146, false))
+	if err != nil {
+		t.Fatalf("EvaluateAll: %v", err)
+	}
+	v, ok := checkResult(nv, "gpu_xid_146")
+	if !ok {
+		t.Fatalf("gpu_xid_146 verdict not found")
+	}
+
+	if v.Severity != health.Warning {
+		t.Errorf("Severity = %v, want WARNING", v.Severity)
+	}
+	if len(v.Messages) != 1 || !strings.Contains(v.Messages[0], "(Nonfatal)") {
+		t.Errorf("Messages = %q, want one (Nonfatal) message", v.Messages)
 	}
 }
