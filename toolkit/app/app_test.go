@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -18,6 +19,80 @@ import (
 )
 
 const testNodeID = "node-123"
+
+func TestEvaluateCommandUsesCollectedMeasurements(t *testing.T) {
+	batch, err := collectionOutput(testNodeID, "GB200", nil, []toolkit.SensorMeasurements{{
+		Sensor:       "node",
+		Measurements: []health.Measurement{node.NodeMeasurement{GPUCount: 4}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := t.TempDir() + "/measurements.json"
+	if err = os.WriteFile(input, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := New().WithProgramName("test")
+	a.host = panicHost{}
+	var stdout, stderr bytes.Buffer
+	if code := a.evaluateCommand([]string{"--input", input}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("evaluate exit = %d, stderr = %q", code, stderr.String())
+	}
+	var verdict health.NodeVerdict
+	if err = json.Unmarshal(stdout.Bytes(), &verdict); err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range verdict.CheckResults {
+		if result.CheckID == "gpu_count" && result.Severity == health.Pass {
+			return
+		}
+	}
+	t.Fatalf("gpu_count PASS missing from verdict: %s", stdout.String())
+}
+
+func TestCollectedMeasurementRestoresTimeoutError(t *testing.T) {
+	measurement, err := decodeCollectedMeasurement(collectedMeasurement{
+		Measurement:     json.RawMessage(`{"gpu_count":0}`),
+		MeasurementType: "node",
+		Errors: []collectedError{{
+			Message:       "node sensor: collection timed out",
+			FailedSignals: []string{node.SignalGPUCount},
+			Timeout:       true,
+		}},
+		Category: health.Node,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failures := measurement.Errors(); len(failures) != 1 || !errors.Is(failures[0].Err(), health.ErrCollectionTimeout) {
+		t.Fatalf("errors = %v, want one collection timeout", failures)
+	}
+}
+
+func TestCollectionRoundTripSupportsMultipleMeasurementTypesPerSensor(t *testing.T) {
+	batch, err := collectionOutput(testNodeID, "GB200", nil, []toolkit.SensorMeasurements{{
+		Sensor: "combined",
+		Measurements: []health.Measurement{
+			node.NodeMeasurement{GPUCount: 4},
+			cpu.CPUMeasurement{PossibleCPUCount: 8, OnlineCPUCount: 8, NUMANodeCount: 1},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	measurements, err := decodeCollectedMeasurements(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(measurements) != 2 || measurements[0].Category() != health.Node || measurements[1].Category() != health.CPU {
+		t.Fatalf("measurements = %v, want node and CPU", measurements)
+	}
+}
 
 func TestCollectionCategoriesWithoutConfigIncludesEveryBuiltinDomain(t *testing.T) {
 	cat := catalog.New()
@@ -51,7 +126,7 @@ func TestCollectionCategories(t *testing.T) {
 func TestCollectionOutputSignalStatus(t *testing.T) {
 	partial := nvlink.NVLinkMeasurement{GPUID: "GPU-0", LinkCount: 18}
 	partial.AddError(errors.New("speed unavailable"), nvlink.SignalSpeedMBytesPerSec)
-	batch, err := collectionOutput([]toolkit.SensorMeasurements{{
+	batch, err := collectionOutput(testNodeID, "GB200", nil, []toolkit.SensorMeasurements{{
 		Sensor:       "nvlink",
 		Measurements: []health.Measurement{partial},
 	}})

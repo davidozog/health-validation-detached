@@ -272,9 +272,10 @@ Collect sensor measurements without evaluating checks:
 
 ```shell
 ./health-validation collect > measurements.json
+./health-validation evaluate --input measurements.json
 ```
 
-For `collect`, an optional config's check IDs select the sensor domains to run. Without one, every built-in sensor domain runs. The output groups measurements by their producing sensor. Each measurement includes its producing sensor as `measurement_type`, an `available` or `unavailable` status for every signal, and any per-signal collection errors. Sensor failures remain structured data and do not change the successful exit code.
+For `collect`, an optional config's check IDs select the sensor domains to run. Without one, every built-in sensor domain runs. The output includes node and architecture metadata, groups measurements by their producing sensor, identifies each concrete measurement type, records an `available` or `unavailable` status for every signal, and preserves per-signal collection errors. Sensor failures remain structured data and do not change the successful exit code. `evaluate` reconstructs the typed measurements and applies the catalog without running sensors; pass the same optional `--config` to retain threshold overrides and disabled checks.
 
 Slurm prolog integration:
 

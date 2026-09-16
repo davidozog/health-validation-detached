@@ -40,7 +40,13 @@ import (
 	"time"
 
 	"github.com/dsx-ai-factory/health-validation/catalog"
+	"github.com/dsx-ai-factory/health-validation/catalog/cpu"
+	"github.com/dsx-ai-factory/health-validation/catalog/gpu"
 	"github.com/dsx-ai-factory/health-validation/catalog/health"
+	"github.com/dsx-ai-factory/health-validation/catalog/infiniband"
+	"github.com/dsx-ai-factory/health-validation/catalog/node"
+	"github.com/dsx-ai-factory/health-validation/catalog/nvlink"
+	"github.com/dsx-ai-factory/health-validation/catalog/xid"
 	"github.com/dsx-ai-factory/health-validation/toolkit"
 )
 
@@ -236,6 +242,8 @@ func (a *App) Close() error { return a.host.close() }
 
 // Run is the health-validation CLI entrypoint:
 //
+//	health-validation [--verbose] collect [--node-id <id>] [--config <path>]
+//	health-validation [--verbose] evaluate --input <path> [--config <path>]
 //	health-validation [--verbose] run [--node-id <id>] [--config <path>]
 //	health-validation [--verbose] version [--short] [--output json]
 //
@@ -281,6 +289,8 @@ func (a *App) dispatch(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "collect":
 		return a.collectCommand(args[1:], stdout, stderr)
+	case "evaluate":
+		return a.evaluateCommand(args[1:], stdout, stderr)
 	case "run":
 		return a.runCommand(args[1:], stdout, stderr)
 	case "version":
@@ -417,7 +427,7 @@ func (a *App) resolveNodeID(value string, supplied bool) (string, error) {
 
 // usage returns the one-line usage banner for the given program name.
 func usage(prog string) string {
-	return "usage: " + prog + " <collect|run|version> [flags]"
+	return "usage: " + prog + " <collect|evaluate|run|version> [flags]"
 }
 
 var categoryBySensor = map[string]health.Category{
@@ -431,7 +441,10 @@ var categoryBySensor = map[string]health.Category{
 }
 
 type collectedBatch struct {
-	Sensors []collectedSensor `json:"sensors"`
+	NodeID            string            `json:"node_id"`
+	Architecture      string            `json:"architecture,omitempty"`
+	ArchitectureError string            `json:"architecture_error,omitempty"`
+	Sensors           []collectedSensor `json:"sensors"`
 }
 
 type collectedSensor struct {
@@ -440,11 +453,11 @@ type collectedSensor struct {
 }
 
 type collectedMeasurement struct {
-	Measurement     health.Measurement `json:"measurement"`
-	SignalStatus    map[string]string  `json:"signal_status"`
-	MeasurementType string             `json:"measurement_type"`
-	Errors          []collectedError   `json:"errors,omitempty"`
-	Category        health.Category    `json:"category"`
+	SignalStatus    map[string]string `json:"signal_status"`
+	MeasurementType string            `json:"measurement_type"`
+	Measurement     json.RawMessage   `json:"measurement"`
+	Errors          []collectedError  `json:"errors,omitempty"`
+	Category        health.Category   `json:"category"`
 }
 
 type collectedError struct {
@@ -453,11 +466,24 @@ type collectedError struct {
 	Timeout       bool     `json:"timeout,omitempty"`
 }
 
+type collectedFailure struct {
+	message string
+	timeout bool
+}
+
+func (f collectedFailure) Error() string { return f.message }
+
+func (f collectedFailure) Is(target error) bool {
+	return f.timeout && target == health.ErrCollectionTimeout
+}
+
 // collectCommand runs only the sensors selected by checks listed in config.
 func (a *App) collectCommand(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(a.prog+" collect", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "path to a YAML config listing checks to collect")
+	nodeID := fs.String("node-id", a.nodeID,
+		"identifier of the node under test (overrides the configured default or system hostname)")
 	if err := fs.Parse(args); err != nil {
 		return exitError
 	}
@@ -465,9 +491,19 @@ func (a *App) collectCommand(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "%s: unexpected argument %q\n", a.prog, fs.Arg(0))
 		return exitError
 	}
+	nodeIDSet := a.nodeIDSet
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "node-id" {
+			nodeIDSet = true
+		}
+	})
+	resolvedNodeID, err := a.resolveNodeID(*nodeID, nodeIDSet)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", a.prog, err)
+		return exitError
+	}
 	cfg := &Config{}
 	if strings.TrimSpace(*configPath) != "" {
-		var err error
 		cfg, err = LoadConfig(*configPath)
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", a.prog, err)
@@ -485,23 +521,98 @@ func (a *App) collectCommand(args []string, stdout, stderr io.Writer) int {
 		return exitError
 	}
 	defer a.host.close()
+	architecture, architectureErr := a.host.architecture()
+	if architecture == "" && architectureErr == nil {
+		architectureErr = errors.New("architecture is empty")
+	}
 	sensors, err := collectionSensors(a.sensors(), categories)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", a.prog, err)
 		return exitError
 	}
-	output, err := collectionOutput(toolkit.CollectMeasurementsWithTimeout(timeout, sensors...))
+	batch, err := collectionOutput(resolvedNodeID, architecture, architectureErr,
+		toolkit.CollectMeasurementsWithTimeout(timeout, sensors...))
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: prepare collected measurements: %v\n", a.prog, err)
+		fmt.Fprintf(stderr, "%s: encode collected measurements: %v\n", a.prog, err)
 		return exitError
 	}
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
-	if encodeErr := encoder.Encode(output); encodeErr != nil {
+	if encodeErr := encoder.Encode(batch); encodeErr != nil {
 		fmt.Fprintf(stderr, "%s: write collected measurements: %v\n", a.prog, encodeErr)
 		return exitError
 	}
 	return exitOK
+}
+
+func (a *App) evaluateCommand(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet(a.prog+" evaluate", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("config", "", "path to a YAML config that parameterizes and disables checks (optional)")
+	inputPath := fs.String("input", "", "path to JSON produced by collect")
+	if err := fs.Parse(args); err != nil {
+		return exitError
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "%s: unexpected argument %q\n", a.prog, fs.Arg(0))
+		return exitError
+	}
+	if strings.TrimSpace(*inputPath) == "" {
+		fmt.Fprintf(stderr, "%s: --input is required\n", a.prog)
+		return exitError
+	}
+
+	input, err := os.Open(*inputPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: open collected measurements: %v\n", a.prog, err)
+		return exitError
+	}
+	defer input.Close()
+
+	var batch collectedBatch
+	decoder := json.NewDecoder(input)
+	decoder.DisallowUnknownFields()
+	if err = decoder.Decode(&batch); err != nil {
+		fmt.Fprintf(stderr, "%s: decode collected measurements: %v\n", a.prog, err)
+		return exitError
+	}
+	var extra any
+	if err = decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		fmt.Fprintf(stderr, "%s: decode collected measurements: unexpected trailing JSON\n", a.prog)
+		return exitError
+	}
+	if strings.TrimSpace(batch.NodeID) == "" {
+		fmt.Fprintf(stderr, "%s: collected measurements have no node_id\n", a.prog)
+		return exitError
+	}
+	if batch.Architecture == "" {
+		cause := batch.ArchitectureError
+		if cause == "" {
+			cause = "architecture is empty"
+		}
+		return writeVerdict(discoveryFailureVerdict(errors.New(cause)), a.prog, batch.NodeID, stdout, stderr)
+	}
+	if batch.ArchitectureError != "" {
+		fmt.Fprintf(stderr, "%s: collected measurements contain both architecture and architecture_error\n", a.prog)
+		return exitError
+	}
+
+	measurements, err := decodeCollectedMeasurements(batch)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: decode collected measurements: %v\n", a.prog, err)
+		return exitError
+	}
+	cat, _, err := buildCatalog(*configPath, a.customChecks, batch.Architecture)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", a.prog, err)
+		return exitError
+	}
+	verdict, err := cat.EvaluateAll(measurements...)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", a.prog, err)
+		return exitError
+	}
+	return writeVerdict(verdict, a.prog, batch.NodeID, stdout, stderr)
 }
 
 func collectionCategories(cat *catalog.Catalog, cfg *Config) (map[health.Category]bool, error) {
@@ -552,17 +663,28 @@ func collectionSensors(sensors []toolkit.Sensor, categories map[health.Category]
 	return selected, nil
 }
 
-func collectionOutput(groups []toolkit.SensorMeasurements) (collectedBatch, error) {
-	batch := collectedBatch{Sensors: make([]collectedSensor, 0, len(groups))}
+func collectionOutput(nodeID, architecture string, architectureErr error, groups []toolkit.SensorMeasurements) (collectedBatch, error) {
+	batch := collectedBatch{
+		Sensors:      make([]collectedSensor, 0, len(groups)),
+		NodeID:       nodeID,
+		Architecture: architecture,
+	}
+	if architectureErr != nil {
+		batch.ArchitectureError = architectureErr.Error()
+	}
 	for _, group := range groups {
 		output := collectedSensor{Sensor: group.Sensor, Measurements: make([]collectedMeasurement, 0, len(group.Measurements))}
 		for _, measurement := range group.Measurements {
-			encoded, err := json.Marshal(measurement)
+			measurementType, err := collectedMeasurementType(measurement)
 			if err != nil {
-				return collectedBatch{}, fmt.Errorf("marshal %s measurement: %w", group.Sensor, err)
+				return collectedBatch{}, fmt.Errorf("%s sensor measurement: %w", group.Sensor, err)
+			}
+			raw, err := json.Marshal(measurement)
+			if err != nil {
+				return collectedBatch{}, fmt.Errorf("%s sensor measurement: %w", group.Sensor, err)
 			}
 			var signals map[string]json.RawMessage
-			if err := json.Unmarshal(encoded, &signals); err != nil || signals == nil {
+			if err := json.Unmarshal(raw, &signals); err != nil || signals == nil {
 				return collectedBatch{}, fmt.Errorf("%s measurement must encode as a JSON object", group.Sensor)
 			}
 			status := make(map[string]string, len(signals))
@@ -570,9 +692,9 @@ func collectionOutput(groups []toolkit.SensorMeasurements) (collectedBatch, erro
 				status[signal] = "available"
 			}
 			current := collectedMeasurement{
-				Measurement:     measurement,
+				Measurement:     raw,
+				MeasurementType: measurementType,
 				SignalStatus:    status,
-				MeasurementType: group.Sensor,
 				Category:        measurement.Category(),
 			}
 			for _, failure := range measurement.Errors() {
@@ -590,6 +712,119 @@ func collectionOutput(groups []toolkit.SensorMeasurements) (collectedBatch, erro
 		batch.Sensors = append(batch.Sensors, output)
 	}
 	return batch, nil
+}
+
+func collectedMeasurementType(measurement health.Measurement) (string, error) {
+	switch measurement.(type) {
+	case cpu.CPUMeasurement, *cpu.CPUMeasurement:
+		return "cpu", nil
+	case gpu.GPUMeasurement, *gpu.GPUMeasurement:
+		return "gpu", nil
+	case node.NodeMeasurement, *node.NodeMeasurement:
+		return "node", nil
+	case nvlink.NVLinkMeasurement, *nvlink.NVLinkMeasurement:
+		return "nvlink", nil
+	case xid.XidMeasurement, *xid.XidMeasurement:
+		return "xid", nil
+	case infiniband.LinkFlapMeasurement, *infiniband.LinkFlapMeasurement:
+		return "rdma_link_flap", nil
+	default:
+		return "", fmt.Errorf("unsupported measurement type %T", measurement)
+	}
+}
+
+func decodeCollectedMeasurements(batch collectedBatch) ([]health.Measurement, error) {
+	var measurements []health.Measurement
+	for _, sensor := range batch.Sensors {
+		for i, collected := range sensor.Measurements {
+			measurement, err := decodeCollectedMeasurement(collected)
+			if err != nil {
+				return nil, fmt.Errorf("sensor %q measurement %d: %w", sensor.Sensor, i, err)
+			}
+			measurements = append(measurements, measurement)
+		}
+	}
+	return measurements, nil
+}
+
+func decodeCollectedMeasurement(collected collectedMeasurement) (health.Measurement, error) {
+	var measurement health.Measurement
+	switch collected.MeasurementType {
+	case "cpu":
+		var current cpu.CPUMeasurement
+		if err := json.Unmarshal(collected.Measurement, &current); err != nil {
+			return nil, err
+		}
+		if err := restoreCollectedErrors(&current, collected.Errors); err != nil {
+			return nil, err
+		}
+		measurement = current
+	case "gpu":
+		var current gpu.GPUMeasurement
+		if err := json.Unmarshal(collected.Measurement, &current); err != nil {
+			return nil, err
+		}
+		if err := restoreCollectedErrors(&current, collected.Errors); err != nil {
+			return nil, err
+		}
+		measurement = current
+	case "node":
+		var current node.NodeMeasurement
+		if err := json.Unmarshal(collected.Measurement, &current); err != nil {
+			return nil, err
+		}
+		if err := restoreCollectedErrors(&current, collected.Errors); err != nil {
+			return nil, err
+		}
+		measurement = current
+	case "nvlink":
+		var current nvlink.NVLinkMeasurement
+		if err := json.Unmarshal(collected.Measurement, &current); err != nil {
+			return nil, err
+		}
+		if err := restoreCollectedErrors(&current, collected.Errors); err != nil {
+			return nil, err
+		}
+		measurement = current
+	case "xid":
+		var current xid.XidMeasurement
+		if err := json.Unmarshal(collected.Measurement, &current); err != nil {
+			return nil, err
+		}
+		if err := restoreCollectedErrors(&current, collected.Errors); err != nil {
+			return nil, err
+		}
+		measurement = current
+	case "rdma_link_flap":
+		var current infiniband.LinkFlapMeasurement
+		if err := json.Unmarshal(collected.Measurement, &current); err != nil {
+			return nil, err
+		}
+		if err := restoreCollectedErrors(&current, collected.Errors); err != nil {
+			return nil, err
+		}
+		measurement = current
+	default:
+		return nil, fmt.Errorf("unsupported measurement_type %q", collected.MeasurementType)
+	}
+	if measurement.Category() != collected.Category {
+		return nil, fmt.Errorf("category %s does not match sensor category %s", collected.Category, measurement.Category())
+	}
+	return measurement, nil
+}
+
+type measurementErrorAdder interface {
+	AddError(error, ...string)
+}
+
+func restoreCollectedErrors(measurement measurementErrorAdder, failures []collectedError) error {
+	for _, failure := range failures {
+		if strings.TrimSpace(failure.Message) == "" || len(failure.FailedSignals) == 0 {
+			return errors.New("measurement error requires message and failed_signals")
+		}
+		measurement.AddError(collectedFailure{message: failure.Message, timeout: failure.Timeout}, failure.FailedSignals...)
+	}
+	return nil
 }
 
 // buildCatalog returns a catalog pre-loaded with all built-in checks plus
