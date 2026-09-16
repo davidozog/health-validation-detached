@@ -10,13 +10,7 @@ import (
 	"github.com/dsx-ai-factory/health-validation/catalog/infiniband"
 )
 
-func linkflapCatalog(opts ...catalog.Option) *catalog.Catalog {
-	defaults := []catalog.Option{
-		catalog.WithArchitecture("GB200"),
-		catalog.WithExecutionContext(health.OperatorInfra),
-	}
-	return catalog.New(append(defaults, opts...)...)
-}
+func linkflapCatalog(opts ...catalog.Option) *catalog.Catalog { return ibCatalog(opts...) }
 
 // outages builds a measurement carrying only the headline signal; the
 // per-outage detail is exercised by the toolkit parser tests.

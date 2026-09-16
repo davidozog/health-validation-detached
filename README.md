@@ -210,6 +210,8 @@ The catalog includes these check families:
 | `nvlink_capabilities` | nvlink | Whether each GPU reports its expected NVLink capabilities | None |
 | `nvlink_p2p` | nvlink | Peer GPUs reachable over NVLink P2P | `max_unhealthy_p2p_peers` |
 | `rdma_linkflap_fatal` | infiniband | mlx5 RDMA link outages that stayed down past a window | `min_outage_seconds`, `fatal_flap_threshold` |
+| `ib_port_state` | infiniband | Whether each port reported by `ibstat` is Active and LinkUp, on any link layer | `expected_ib_state`, `expected_ib_physical_state` |
+| `ib_port_rate` | infiniband | Whether each active port negotiated its expected rate — exactly the platform's port rate when unsplit, or any legal division when split. InfiniBand defaults to unsplit, Ethernet to split. CRITICAL on an unsupported rate, WARNING on a likely-undeclared split | `expected_ib_rate_gbps`, `expected_ib_split_rates_gbps`, `infiniband_port_split`, `ethernet_port_split`, `expected_ib_state` |
 | `gpu_xid_<code>` | xid | One CRITICAL check per critical Xid code seen in the journal | None |
 | `gpu_xid_warning` | xid | Consolidated WARNING check for warning-class Xid codes | None |
 | `gpu_xid_154` | xid | Xid 154 (INFO — recovery action changed) | None |
@@ -230,6 +232,7 @@ Each check definition carries:
 - Linux sysfs exposing `/sys/devices/system/cpu/{possible,online}` and `/sys/devices/system/node/online` (required for CPU collection)
 - NVIDIA driver (required for the GPU sensor; not required if you supply measurements directly)
 - NVML (libnvidia-ml) for the NVML-backed sensor
+- `ibstat` (from `infiniband-diags`) for the `ib_port_*` checks. It is optional: a host without it — or without InfiniBand adapters — produces no port measurements, so those checks are reported in `skipped_checks` rather than failing the node.
 
 OS: Linux (x86_64, aarch64). CPU collection reads sysfs directly without sudo or an external executable. The toolkit GPU sensor is Linux-only; the catalog package compiles and runs on any platform.
 

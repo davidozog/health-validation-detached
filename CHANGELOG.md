@@ -3,6 +3,32 @@
 All notable changes to NVIDIA Health Validation are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Features
+
+- New ibstat sensor and two InfiniBand port checks. `toolkit.IBStat` runs
+  `ibstat` and emits one `infiniband.PortMeasurement` per port on every channel
+  adapter; `ib_port_state` fails CRITICAL on a port that is not Active/LinkUp,
+  and `ib_port_rate` fails CRITICAL on an active port that did not negotiate
+  its expected rate — a degraded link that costs bandwidth without ever logging
+  an outage. Because an adapter's rate can be divided across logical ports, the
+  check runs in one of two modes per port: unsplit demands
+  `expected_ib_rate_gbps` exactly (GB200 400, GB300 800), while split accepts
+  any member of `expected_ib_split_rates_gbps` (GB200 400/200/100, GB300
+  800/400/200/100). The mode follows the link layer — `infiniband_port_split`
+  defaults false and `ethernet_port_split` defaults true, matching how each is
+  normally deployed — and either can be overridden per fleet. Severity tracks
+  confidence: a rate no division produces is CRITICAL, while an unsplit port
+  sitting on a legal division is WARNING with a `monitor` action, since that
+  reading is more often an undeclared split than a fault and draining a fleet
+  over an unset threshold would cost more than the degradation. Config
+  thresholds now accept numeric lists. The sensor is wired into
+  the stock CLI by default and overridable with `App.WithIBStatBackend`.
+  A host where `ibstat` is not installed, or that reports no adapters, produces
+  no measurements, so both checks appear in `skipped_checks` rather than
+  failing a node that has no InfiniBand. Both are `Experimental`.
+
 ## [catalog/v0.2.0-rc1] and [toolkit/v0.2.0-rc1] - 2026-09-15
 
 Release candidate covering everything since `catalog/v0.1.0` and

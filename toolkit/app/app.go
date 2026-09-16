@@ -16,10 +16,12 @@
 //		os.Exit(a.Run(os.Args[1:], os.Stdout, os.Stderr))
 //	}
 //
-// Each of the six sensors (GPU, node, NVLink, CPU, Xid, InfiniBand) draws from
-// its own per-domain backend, defaulting to the shared host NVML backend for
-// GPU/node/NVLink, sysfs for CPU and InfiniBand, and the journal for Xid. A
-// With*Backend setter overrides exactly one domain; the
+// Each of the seven sensors wired by default (GPU, node, NVLink, CPU, Xid,
+// RDMA link-flap, ibstat) draws from its own per-domain backend, defaulting to
+// the shared host NVML backend for GPU/node/NVLink, sysfs for CPU, the journal
+// for Xid and RDMA link-flap, and ibstat for InfiniBand port state. An eighth,
+// the generic InfiniBand sensor, is opt-in. A With*Backend setter overrides
+// exactly one domain; the
 // node domain has no probe seam (gpu_count is a scalar aggregate), so it is a
 // full backend swap. Custom checks register alongside the built-ins as a pure
 // pass-through: their author-declared classification (Provenance, …) is
@@ -81,24 +83,26 @@ type hostBackend interface {
 }
 
 // App is the health-validation CLI, assembled with the builder methods and
-// run with [App.Run]. It wires six sensors (GPU, node, NVLink, CPU, Xid,
-// InfiniBand), each from its own per-domain backend — the shared host NVML
-// backend, sysfs, or the journal by default, or a caller-supplied override.
+// run with [App.Run]. It wires seven sensors (GPU, node, NVLink, CPU, Xid,
+// RDMA link-flap, ibstat), each from its own per-domain backend — the shared
+// host NVML backend, sysfs, the journal, or ibstat by default, or a
+// caller-supplied override. The generic InfiniBand sensor is opt-in.
 type App struct {
 	host     hostBackend
 	hostname func() (string, error)
-	// gpu, node, nvlink, cpu, xid, rdmaLinkFlap, and ib are per-domain backend
-	// overrides set by the matching With*Backend setter. A nil override uses the
-	// default: the shared host NVML backend for gpu/node/nvlink,
-	// [toolkit.SysfsCPU] for cpu, [toolkit.Journalctl] for xid, and
-	// [toolkit.JournalctlRDMALinkFlap] for rdmaLinkFlap. The generic ib backend
-	// has no default and is opt-in.
+	// gpu, node, nvlink, cpu, xid, rdmaLinkFlap, ibstat, and ib are per-domain
+	// backend overrides set by the matching With*Backend setter. A nil override
+	// uses the default: the shared host NVML backend for gpu/node/nvlink,
+	// [toolkit.SysfsCPU] for cpu, [toolkit.Journalctl] for xid,
+	// [toolkit.JournalctlRDMALinkFlap] for rdmaLinkFlap, and [toolkit.IBStat]
+	// for ibstat. The generic ib backend has no default and is opt-in.
 	gpu          toolkit.GPUBackend
 	node         toolkit.NodeBackend
 	nvlink       toolkit.NVLinkBackend
 	cpu          toolkit.CPUBackend
 	xid          toolkit.XidBackend
 	rdmaLinkFlap toolkit.RDMALinkFlapBackend
+	ibstat       toolkit.IBStatBackend
 	ib           toolkit.IBBackend
 	// prog is the program name used in usage and error-message prefixes. It
 	// defaults to filepath.Base(os.Args[0]); see WithProgramName.
@@ -188,9 +192,20 @@ func (a *App) WithRDMALinkFlapBackend(b toolkit.RDMALinkFlapBackend) *App {
 	return a
 }
 
-// WithIBBackend sets the generic InfiniBand sensor's backend. It is opt-in: the
-// catalog's only built-in InfiniBand check (rdma_linkflap_fatal) is fed by the
-// link-flap sensor, not this one. Supply a backend here to contribute
+// WithIBStatBackend overrides the ibstat sensor's backend (default:
+// [toolkit.IBStat], which reports per-port InfiniBand link state and
+// negotiated rate). This sensor feeds the built-in ib_port_state and
+// ib_port_rate checks and runs by default, like the Xid and link-flap
+// sensors. A host with no ibstat and no InfiniBand adapters produces no
+// measurements, leaving those checks skipped rather than failed.
+func (a *App) WithIBStatBackend(b toolkit.IBStatBackend) *App {
+	a.ibstat = b
+	return a
+}
+
+// WithIBBackend sets the generic InfiniBand sensor's backend. It is opt-in:
+// every built-in InfiniBand check is fed by the link-flap or ibstat sensor,
+// not this one. Supply a backend here to contribute
 // additional InfiniBand measurements — the backend owns device enumeration, the
 // measurement types it emits, and (with the checks a consumer adds via
 // WithChecks) those extra checks.
@@ -289,10 +304,10 @@ func (a *App) dispatch(args []string, stdout, stderr io.Writer) int {
 }
 
 // runCommand parses `run` flags, builds the catalog (applying any config
-// overrides and custom checks), and evaluates it against the six domain
-// sensors. Each sensor's backend is the caller's override if set, else the
-// default: the shared host NVML backend for gpu/node/nvlink, sysfs for cpu and
-// infiniband, and the system journal for xid.
+// overrides and custom checks), and evaluates it against the default sensors.
+// Each sensor's backend is the caller's override if set, else the default: the
+// shared host NVML backend for gpu/node/nvlink, sysfs for cpu, the system
+// journal for xid and rdma link-flap, and ibstat for infiniband port state.
 func (a *App) runCommand(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(a.prog+" run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -369,6 +384,10 @@ func (a *App) runCommand(args []string, stdout, stderr io.Writer) int {
 	if rdmaLinkFlap == nil {
 		rdmaLinkFlap = toolkit.JournalctlRDMALinkFlap()
 	}
+	ibstat := a.ibstat
+	if ibstat == nil {
+		ibstat = toolkit.IBStat()
+	}
 
 	sensors := []toolkit.Sensor{
 		toolkit.NewGPUSensor(gpu),
@@ -377,11 +396,11 @@ func (a *App) runCommand(args []string, stdout, stderr io.Writer) int {
 		toolkit.NewCPUSensor(cpu),
 		toolkit.NewXidSensor(xid),
 		toolkit.NewRDMALinkFlapSensor(rdmaLinkFlap),
+		toolkit.NewIBStatSensor(ibstat),
 	}
-	// The generic InfiniBand sensor is opt-in: the catalog's built-in
-	// InfiniBand check (rdma_linkflap_fatal) is fed by the link-flap sensor
-	// above, so this one runs only when a consumer supplies a backend (and
-	// its own checks) via WithIBBackend.
+	// The generic InfiniBand sensor is opt-in: the built-in InfiniBand checks
+	// are fed by the link-flap and ibstat sensors above, so this one runs only
+	// when a consumer supplies a backend (and its own checks) via WithIBBackend.
 	if a.ib != nil {
 		sensors = append(sensors, toolkit.NewIBSensor(a.ib))
 	}

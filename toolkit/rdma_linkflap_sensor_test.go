@@ -11,12 +11,7 @@ import (
 	"github.com/dsx-ai-factory/health-validation/toolkit"
 )
 
-func linkFlapCatalog() *catalog.Catalog {
-	return catalog.New(
-		catalog.WithArchitecture("GB200"),
-		catalog.WithExecutionContext(health.OperatorInfra),
-	)
-}
+func linkFlapCatalog() *catalog.Catalog { return ibStatCatalog() }
 
 func TestRDMALinkFlapSensor_Name(t *testing.T) {
 	s := toolkit.NewRDMALinkFlapSensor(toolkit.MockRDMALinkFlap())

@@ -5,6 +5,9 @@ go_library(
     srcs = [
         "linkflap.go",
         "measurement.go",
+        "measurement_port.go",
+        "port_rate.go",
+        "port_state.go",
     ],
     importpath = "github.com/dsx-ai-factory/health-validation/catalog/infiniband",
     visibility = ["//visibility:public"],
@@ -13,7 +16,11 @@ go_library(
 
 go_test(
     name = "infiniband_test",
-    srcs = ["linkflap_test.go"],
+    srcs = [
+        "linkflap_test.go",
+        "port_rate_test.go",
+        "port_state_test.go",
+    ],
     deps = [
         ":infiniband",
         "//catalog",
