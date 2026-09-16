@@ -19,6 +19,35 @@ import (
 
 const testNodeID = "node-123"
 
+func TestCollectionCategoriesWithoutConfigIncludesEveryBuiltinDomain(t *testing.T) {
+	cat := catalog.New()
+	categories, err := collectionCategories(cat, &Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(categories) != len(cat.Categories()) {
+		t.Fatalf("categories = %v, want every built-in domain %v", categories, cat.Categories())
+	}
+}
+
+func TestCollectionCategories(t *testing.T) {
+	categories, err := collectionCategories(catalog.New(), &Config{
+		Checks: map[string]map[string]any{
+			"gpu_count":     {},
+			"nvlink_active": {},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(categories) != 2 || !categories[health.Node] || !categories[health.NVLink] {
+		t.Fatalf("categories = %v, want node and nvlink", categories)
+	}
+	if categories[health.GPU] {
+		t.Fatal("unselected GPU category included")
+	}
+}
+
 // customCheck is a minimal node check used to exercise the WithChecks SPI.
 func customCheck() health.CheckDefinition {
 	return health.CheckDefinition{

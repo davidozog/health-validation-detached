@@ -43,20 +43,44 @@ func Collect(cat *catalog.Catalog, sensors ...Sensor) (health.NodeVerdict, error
 // CollectWithTimeout returns an error only when evaluation itself fails,
 // never for a sensor failure.
 func CollectWithTimeout(cat *catalog.Catalog, timeout time.Duration, sensors ...Sensor) (health.NodeVerdict, error) {
+	groups := CollectMeasurementsWithTimeout(timeout, sensors...)
+	var all []health.Measurement
+	for _, group := range groups {
+		all = append(all, group.Measurements...)
+	}
+
+	nv, err := cat.EvaluateAll(all...)
+	if err != nil {
+		return nv, err
+	}
+	warnMissingSensors(nv)
+	return nv, nil
+}
+
+// SensorMeasurements identifies the sensor that produced a group of measurements.
+type SensorMeasurements struct {
+	Sensor       string
+	Measurements []health.Measurement
+}
+
+// CollectMeasurementsWithTimeout runs sensors without evaluating checks.
+func CollectMeasurementsWithTimeout(timeout time.Duration, sensors ...Sensor) []SensorMeasurements {
 	// Backend resource keys whose collection timed out; sensors sharing one
 	// are skipped rather than re-entering a presumed-wedged data source.
 	wedged := make(map[string]bool)
 
-	var all []health.Measurement
+	groups := make([]SensorMeasurements, 0, len(sensors))
 	for _, s := range sensors {
+		group := SensorMeasurements{Sensor: s.Name()}
 		key := resourceKey(s)
 		if key != "" && wedged[key] {
 			// Degrade this sensor in its own name (not the wedging sensor's)
 			// so the verdict points at the right domain.
 			slog.Warn("skipping sensor; a sensor sharing its backend resource already timed out",
 				"sensor", s.Name(), "resource", key)
-			all = append(all, s.Errored(fmt.Errorf("%s sensor: shared backend resource timed out: %w",
-				s.Name(), health.ErrCollectionTimeout))...)
+			group.Measurements = s.Errored(fmt.Errorf("%s sensor: shared backend resource timed out: %w",
+				s.Name(), health.ErrCollectionTimeout))
+			groups = append(groups, group)
 			continue
 		}
 
@@ -68,22 +92,17 @@ func CollectWithTimeout(cat *catalog.Catalog, timeout time.Duration, sensors ...
 			if key != "" {
 				wedged[key] = true
 			}
-			all = append(all, s.Errored(fmt.Errorf("%s sensor: %w", s.Name(), health.ErrCollectionTimeout))...)
+			group.Measurements = s.Errored(fmt.Errorf("%s sensor: %w", s.Name(), health.ErrCollectionTimeout))
 		case r.err != nil:
 			slog.Warn("sensor collection failed; degrading to errored measurements",
 				"sensor", s.Name(), "error", r.err)
-			all = append(all, s.Errored(r.err)...)
+			group.Measurements = s.Errored(r.err)
 		default:
-			all = append(all, r.measurements...)
+			group.Measurements = r.measurements
 		}
+		groups = append(groups, group)
 	}
-
-	nv, err := cat.EvaluateAll(all...)
-	if err != nil {
-		return nv, err
-	}
-	warnMissingSensors(nv)
-	return nv, nil
+	return groups
 }
 
 // warnMissingSensors logs one warning per domain that reported nothing.

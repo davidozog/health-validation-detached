@@ -29,6 +29,7 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -278,6 +279,8 @@ func (a *App) dispatch(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
+	case "collect":
+		return a.collectCommand(args[1:], stdout, stderr)
 	case "run":
 		return a.runCommand(args[1:], stdout, stderr)
 	case "version":
@@ -345,6 +348,10 @@ func (a *App) runCommand(args []string, stdout, stderr io.Writer) int {
 		return exitError
 	}
 
+	return evaluate(cat, timeout, a.prog, resolvedNodeID, stdout, stderr, a.sensors()...)
+}
+
+func (a *App) sensors() []toolkit.Sensor {
 	gpu := a.gpu
 	if gpu == nil {
 		gpu = a.host.gpuBackend()
@@ -385,7 +392,7 @@ func (a *App) runCommand(args []string, stdout, stderr io.Writer) int {
 	if a.ib != nil {
 		sensors = append(sensors, toolkit.NewIBSensor(a.ib))
 	}
-	return evaluate(cat, timeout, a.prog, resolvedNodeID, stdout, stderr, sensors...)
+	return sensors
 }
 
 func (a *App) resolveNodeID(value string, supplied bool) (string, error) {
@@ -410,7 +417,152 @@ func (a *App) resolveNodeID(value string, supplied bool) (string, error) {
 
 // usage returns the one-line usage banner for the given program name.
 func usage(prog string) string {
-	return "usage: " + prog + " <run|version> [flags]"
+	return "usage: " + prog + " <collect|run|version> [flags]"
+}
+
+var categoryBySensor = map[string]health.Category{
+	"cpu":           health.CPU,
+	"gpu":           health.GPU,
+	"infiniband":    health.InfiniBand,
+	"node":          health.Node,
+	"nvlink":        health.NVLink,
+	"rdma_linkflap": health.InfiniBand,
+	"xid":           health.Xid,
+}
+
+type collectedBatch struct {
+	Sensors []collectedSensor `json:"sensors"`
+}
+
+type collectedSensor struct {
+	Sensor       string                 `json:"sensor"`
+	Measurements []collectedMeasurement `json:"measurements"`
+}
+
+type collectedMeasurement struct {
+	Measurement health.Measurement `json:"measurement"`
+	Errors      []collectedError   `json:"errors,omitempty"`
+	Category    health.Category    `json:"category"`
+}
+
+type collectedError struct {
+	Message       string   `json:"message"`
+	FailedSignals []string `json:"failed_signals"`
+	Timeout       bool     `json:"timeout,omitempty"`
+}
+
+// collectCommand runs only the sensors selected by checks listed in config.
+func (a *App) collectCommand(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet(a.prog+" collect", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("config", "", "path to a YAML config listing checks to collect")
+	if err := fs.Parse(args); err != nil {
+		return exitError
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "%s: unexpected argument %q\n", a.prog, fs.Arg(0))
+		return exitError
+	}
+	cfg := &Config{}
+	if strings.TrimSpace(*configPath) != "" {
+		var err error
+		cfg, err = LoadConfig(*configPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", a.prog, err)
+			return exitError
+		}
+	}
+	cat, timeout, err := buildCatalog(*configPath, a.customChecks, "")
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", a.prog, err)
+		return exitError
+	}
+	categories, err := collectionCategories(cat, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", a.prog, err)
+		return exitError
+	}
+	defer a.host.close()
+	sensors, err := collectionSensors(a.sensors(), categories)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", a.prog, err)
+		return exitError
+	}
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	if encodeErr := encoder.Encode(collectionOutput(toolkit.CollectMeasurementsWithTimeout(timeout, sensors...))); encodeErr != nil {
+		fmt.Fprintf(stderr, "%s: write collected measurements: %v\n", a.prog, encodeErr)
+		return exitError
+	}
+	return exitOK
+}
+
+func collectionCategories(cat *catalog.Catalog, cfg *Config) (map[health.Category]bool, error) {
+	disabled := make(map[string]bool, len(cfg.DisabledChecks))
+	for _, id := range cfg.DisabledChecks {
+		disabled[strings.TrimSpace(id)] = true
+	}
+	wanted := make(map[health.Category]bool)
+	if len(cfg.Checks) == 0 {
+		for _, check := range cat.List(catalog.Filter{}) {
+			if !disabled[check.ID] {
+				wanted[check.Category] = true
+			}
+		}
+	} else {
+		for _, checkID := range sortedKeys(cfg.Checks) {
+			if disabled[checkID] {
+				continue
+			}
+			check, err := cat.Get(checkID)
+			if err != nil {
+				return nil, err
+			}
+			wanted[check.Category] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return nil, fmt.Errorf("config selects no checks to collect")
+	}
+	return wanted, nil
+}
+
+func collectionSensors(sensors []toolkit.Sensor, categories map[health.Category]bool) ([]toolkit.Sensor, error) {
+	selected := make([]toolkit.Sensor, 0, len(categories))
+	covered := make(map[health.Category]bool)
+	for _, sensor := range sensors {
+		category, ok := categoryBySensor[sensor.Name()]
+		if ok && categories[category] {
+			selected = append(selected, sensor)
+			covered[category] = true
+		}
+	}
+	for category := range categories {
+		if !covered[category] {
+			return nil, fmt.Errorf("no sensor available for %s checks", category)
+		}
+	}
+	return selected, nil
+}
+
+func collectionOutput(groups []toolkit.SensorMeasurements) collectedBatch {
+	batch := collectedBatch{Sensors: make([]collectedSensor, 0, len(groups))}
+	for _, group := range groups {
+		output := collectedSensor{Sensor: group.Sensor, Measurements: make([]collectedMeasurement, 0, len(group.Measurements))}
+		for _, measurement := range group.Measurements {
+			current := collectedMeasurement{Category: measurement.Category(), Measurement: measurement}
+			for _, failure := range measurement.Errors() {
+				current.Errors = append(current.Errors, collectedError{
+					Message:       failure.Err().Error(),
+					FailedSignals: failure.FailedSignals(),
+					Timeout:       errors.Is(failure.Err(), health.ErrCollectionTimeout),
+				})
+			}
+			output.Measurements = append(output.Measurements, current)
+		}
+		batch.Sensors = append(batch.Sensors, output)
+	}
+	return batch
 }
 
 // buildCatalog returns a catalog pre-loaded with all built-in checks plus

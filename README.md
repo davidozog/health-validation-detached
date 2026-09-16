@@ -268,6 +268,14 @@ Run with a config file (threshold overrides):
 ./health-validation run --config operator.yaml
 ```
 
+Collect sensor measurements without evaluating checks:
+
+```shell
+./health-validation collect > measurements.json
+```
+
+For `collect`, an optional config's check IDs select the sensor domains to run. Without one, every built-in sensor domain runs. The output groups measurements by their producing sensor and includes per-signal collection errors. Sensor failures remain structured data and do not change the successful exit code.
+
 Slurm prolog integration:
 
 ```shell
