@@ -152,20 +152,27 @@ func TestXidErrors_NVLink5_FatalIsCritical(t *testing.T) {
 	}
 }
 
-func TestXidErrors_NVLink5_NonfatalIsWarningNoAction(t *testing.T) {
+// TestXidErrors_NVLink5_NonfatalIsInfoNoAction pins what a Nonfatal
+// occurrence costs the node: nothing. The decode table resolves it to
+// IGNORE, so it is reported at INFO (which exits 0) rather than drawing
+// a WARNING the operator cannot act on.
+func TestXidErrors_NVLink5_NonfatalIsInfoNoAction(t *testing.T) {
 	nv, err := xidCatalog(t).EvaluateAll(nvlink5MeasurementFor(146, false))
 	if err != nil {
 		t.Fatalf("EvaluateAll: %v", err)
 	}
-	if nv.OverallSeverity != health.Warning {
-		t.Errorf("OverallSeverity = %v, want WARNING", nv.OverallSeverity)
+	if nv.OverallSeverity != health.Info {
+		t.Errorf("OverallSeverity = %v, want INFO", nv.OverallSeverity)
+	}
+	if nv.ExitCode() != 0 {
+		t.Errorf("ExitCode = %d, want 0: an ignorable fault must not fail the run", nv.ExitCode())
 	}
 	v, ok := checkResult(nv, "gpu_xid_146")
 	if !ok {
 		t.Fatalf("gpu_xid_146 verdict not found")
 	}
-	if v.Severity != health.Warning {
-		t.Errorf("gpu_xid_146 severity = %v, want WARNING", v.Severity)
+	if v.Severity != health.Info {
+		t.Errorf("gpu_xid_146 severity = %v, want INFO", v.Severity)
 	}
 	if !v.RecommendedAction.Equal(health.NoAction) {
 		t.Errorf("RecommendedAction = %v, want NoAction", v.RecommendedAction)
@@ -345,6 +352,10 @@ func TestXidErrors_NVLink5_FatalDoesNotAlsoReportNonfatal(t *testing.T) {
 	}
 }
 
+// TestXidErrors_NVLink5_NonfatalStillReports is the other half of not
+// escalating: the event must still appear in the verdict. Dropping the
+// rule entirely would silence it, leaving no record that the fault
+// occurred at all.
 func TestXidErrors_NVLink5_NonfatalStillReports(t *testing.T) {
 	nv, err := xidCatalog(t).EvaluateAll(nvlink5MeasurementFor(146, false))
 	if err != nil {
@@ -355,10 +366,10 @@ func TestXidErrors_NVLink5_NonfatalStillReports(t *testing.T) {
 		t.Fatalf("gpu_xid_146 verdict not found")
 	}
 
-	if v.Severity != health.Warning {
-		t.Errorf("Severity = %v, want WARNING", v.Severity)
+	if v.Severity != health.Info {
+		t.Errorf("Severity = %v, want INFO", v.Severity)
 	}
-	if len(v.Messages) != 1 || !strings.Contains(v.Messages[0], "(Nonfatal)") {
-		t.Errorf("Messages = %q, want one (Nonfatal) message", v.Messages)
+	if len(v.Messages) != 1 || !strings.Contains(v.Messages[0], "no action") {
+		t.Errorf("Messages = %q, want one message stating no action is needed", v.Messages)
 	}
 }
