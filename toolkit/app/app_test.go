@@ -48,6 +48,37 @@ func TestCollectionCategories(t *testing.T) {
 	}
 }
 
+func TestCollectionOutputSignalStatus(t *testing.T) {
+	partial := nvlink.NVLinkMeasurement{GPUID: "GPU-0", LinkCount: 18}
+	partial.AddError(errors.New("speed unavailable"), nvlink.SignalSpeedMBytesPerSec)
+	batch, err := collectionOutput([]toolkit.SensorMeasurements{{
+		Sensor:       "nvlink",
+		Measurements: []health.Measurement{partial},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := batch.Sensors[0].Measurements[0]
+	if got.MeasurementType != "nvlink" {
+		t.Errorf("measurement_type = %q, want nvlink", got.MeasurementType)
+	}
+	if len(got.SignalStatus) != len(nvlink.MeasurementSignals) {
+		t.Fatalf("signal_status has %d entries, want %d", len(got.SignalStatus), len(nvlink.MeasurementSignals))
+	}
+	if got.SignalStatus[nvlink.SignalGPUID] != "available" || got.SignalStatus[nvlink.SignalSpeedMBytesPerSec] != "unavailable" {
+		t.Errorf("signal_status = %v", got.SignalStatus)
+	}
+	wire, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"measurement_type"`, `"signal_status"`} {
+		if !bytes.Contains(wire, []byte(field)) {
+			t.Errorf("JSON output is missing %s: %s", field, wire)
+		}
+	}
+}
+
 // customCheck is a minimal node check used to exercise the WithChecks SPI.
 func customCheck() health.CheckDefinition {
 	return health.CheckDefinition{

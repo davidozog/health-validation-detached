@@ -440,9 +440,11 @@ type collectedSensor struct {
 }
 
 type collectedMeasurement struct {
-	Measurement health.Measurement `json:"measurement"`
-	Errors      []collectedError   `json:"errors,omitempty"`
-	Category    health.Category    `json:"category"`
+	Measurement     health.Measurement `json:"measurement"`
+	SignalStatus    map[string]string  `json:"signal_status"`
+	MeasurementType string             `json:"measurement_type"`
+	Errors          []collectedError   `json:"errors,omitempty"`
+	Category        health.Category    `json:"category"`
 }
 
 type collectedError struct {
@@ -488,9 +490,14 @@ func (a *App) collectCommand(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "%s: %v\n", a.prog, err)
 		return exitError
 	}
+	output, err := collectionOutput(toolkit.CollectMeasurementsWithTimeout(timeout, sensors...))
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: prepare collected measurements: %v\n", a.prog, err)
+		return exitError
+	}
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
-	if encodeErr := encoder.Encode(collectionOutput(toolkit.CollectMeasurementsWithTimeout(timeout, sensors...))); encodeErr != nil {
+	if encodeErr := encoder.Encode(output); encodeErr != nil {
 		fmt.Fprintf(stderr, "%s: write collected measurements: %v\n", a.prog, encodeErr)
 		return exitError
 	}
@@ -545,13 +552,33 @@ func collectionSensors(sensors []toolkit.Sensor, categories map[health.Category]
 	return selected, nil
 }
 
-func collectionOutput(groups []toolkit.SensorMeasurements) collectedBatch {
+func collectionOutput(groups []toolkit.SensorMeasurements) (collectedBatch, error) {
 	batch := collectedBatch{Sensors: make([]collectedSensor, 0, len(groups))}
 	for _, group := range groups {
 		output := collectedSensor{Sensor: group.Sensor, Measurements: make([]collectedMeasurement, 0, len(group.Measurements))}
 		for _, measurement := range group.Measurements {
-			current := collectedMeasurement{Category: measurement.Category(), Measurement: measurement}
+			encoded, err := json.Marshal(measurement)
+			if err != nil {
+				return collectedBatch{}, fmt.Errorf("marshal %s measurement: %w", group.Sensor, err)
+			}
+			var signals map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &signals); err != nil || signals == nil {
+				return collectedBatch{}, fmt.Errorf("%s measurement must encode as a JSON object", group.Sensor)
+			}
+			status := make(map[string]string, len(signals))
+			for signal := range signals {
+				status[signal] = "available"
+			}
+			current := collectedMeasurement{
+				Measurement:     measurement,
+				SignalStatus:    status,
+				MeasurementType: group.Sensor,
+				Category:        measurement.Category(),
+			}
 			for _, failure := range measurement.Errors() {
+				for _, signal := range failure.FailedSignals() {
+					current.SignalStatus[signal] = "unavailable"
+				}
 				current.Errors = append(current.Errors, collectedError{
 					Message:       failure.Err().Error(),
 					FailedSignals: failure.FailedSignals(),
@@ -562,7 +589,7 @@ func collectionOutput(groups []toolkit.SensorMeasurements) collectedBatch {
 		}
 		batch.Sensors = append(batch.Sensors, output)
 	}
-	return batch
+	return batch, nil
 }
 
 // buildCatalog returns a catalog pre-loaded with all built-in checks plus
