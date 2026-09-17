@@ -33,6 +33,7 @@ go_test(
         "checks_test.go",
         "evaluate_test.go",
         "filter_test.go",
+        "host_test.go",
         "override_test.go",
         "signals_test.go",
     ],

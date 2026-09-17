@@ -9,6 +9,7 @@ go_library(
         "cpu_backend.go",
         "cpu_sensor.go",
         "doc.go",
+        "driver_version.go",
         "gpu_backend.go",
         "gpu_sensor.go",
         "ib_backend.go",
@@ -48,6 +49,7 @@ go_test(
     srcs = [
         "collect_test.go",
         "cpu_sensor_test.go",
+        "driver_version_test.go",
         "example_test.go",
         "gpu_sensor_test.go",
         "journal_internal_test.go",

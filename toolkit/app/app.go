@@ -77,6 +77,11 @@ type hostBackend interface {
 	nodeBackend() toolkit.NodeBackend
 	nvlinkBackend() toolkit.NVLinkBackend
 	architecture() (string, error)
+	// driverVersion reports the host's NVIDIA driver version. Unlike
+	// architecture, an unknown version is not a node fault: it narrows
+	// what version-gated code attempts rather than invalidating the
+	// run, so this reports ok=false instead of an error.
+	driverVersion() (health.DriverVersion, bool)
 	close() error
 }
 
@@ -354,7 +359,17 @@ func (a *App) runCommand(args []string, stdout, stderr io.Writer) int {
 		return writeVerdict(discoveryFailureVerdict(err), a.prog, resolvedNodeID, stdout, stderr)
 	}
 
-	cat, timeout, err := buildCatalog(*configPath, a.customChecks, arch)
+	// Discover the driver version once for the whole run and hand it to
+	// the catalog alongside the architecture: both are facts about the
+	// node, not about any one measurement. Unlike architecture this is not
+	// fatal: the only consequence of an unknown version is that
+	// version-gated decoding narrows, so log it and continue.
+	driverVersion, ok := a.host.driverVersion()
+	if !ok {
+		slog.Warn("driver version undetectable; version-gated decoding will be skipped")
+	}
+
+	cat, timeout, err := buildCatalog(*configPath, a.customChecks, health.Host{Architecture: arch, DriverVersion: driverVersion})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", a.prog, err)
 		return exitError
@@ -437,8 +452,9 @@ func usage(prog string) string {
 // validated against the full check set (built-ins + custom) and applied as
 // threshold overrides and disables — so a config may target a custom check
 // too — and its collection_timeout_seconds (if set) is the timeout;
-// otherwise the toolkit default is used.
-func buildCatalog(configPath string, customChecks []health.CheckDefinition, arch string) (*catalog.Catalog, time.Duration, error) {
+// otherwise the toolkit default is used. host carries what discovery found
+// about the node.
+func buildCatalog(configPath string, customChecks []health.CheckDefinition, host health.Host) (*catalog.Catalog, time.Duration, error) {
 	// register adds the caller-supplied checks to a freshly built catalog.
 	// Classification is passed through untouched; the only failure is the
 	// catalog's duplicate-ID guard.
@@ -455,9 +471,9 @@ func buildCatalog(configPath string, customChecks []health.CheckDefinition, arch
 	// NVML reports "unknown" for unrecognized devices so scoped checks still skip.
 	// Evaluate requires a non-empty architecture; the CLI fails discovery before
 	// it would construct a catalog with none.
-	var opts []catalog.Option
-	if arch != "" {
-		opts = append(opts, catalog.WithArchitecture(arch))
+	opts := []catalog.Option{catalog.WithDriverVersion(host.DriverVersion)}
+	if host.Architecture != "" {
+		opts = append(opts, catalog.WithArchitecture(host.Architecture))
 	}
 
 	if configPath == "" {
