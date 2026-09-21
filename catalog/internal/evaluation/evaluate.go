@@ -117,7 +117,7 @@ func (e *EvaluationEngine) EvaluateBatch(checks map[string]*health.CheckDefiniti
 
 	order := TopologicalOrder(checks)
 	verdicts := make([]health.CheckVerdict, 0, len(order))
-	failed := make(map[string]bool, len(order))
+	failed := make(map[string]health.Severity, len(order))
 
 	for _, id := range order {
 		cd := checks[id]
@@ -157,7 +157,7 @@ func (e *EvaluationEngine) EvaluateBatch(checks map[string]*health.CheckDefiniti
 			// check could not complete, is not the one severity excluded from
 			// explaining anything.
 			if v.Severity >= health.Critical && v.ObservedValues != nil {
-				failed[id] = true
+				failed[id] = v.Severity
 			}
 
 			// This entity could not be read at all and a dependency already
@@ -172,9 +172,9 @@ func (e *EvaluationEngine) EvaluateBatch(checks map[string]*health.CheckDefiniti
 			// carrying the "measurement unavailable" prefix, so a second message
 			// without it reads as an observed fault and draws hardware
 			// remediation rather than a collection check.
-			if dep, ok := failedDependency(cd, failed); ok && lostEntity(o.errs, cd.RequiredSignals) {
+			if dep, sev, ok := failedDependency(cd, failed); ok && lostEntity(o.errs, cd.RequiredSignals) {
 				if n := len(v.Messages); n > 0 {
-					v.Messages[n-1] += fmt.Sprintf("; explained by dependency %q, itself CRITICAL", dep)
+					v.Messages[n-1] += fmt.Sprintf("; explained by dependency %q, itself %s", dep, sev)
 				}
 			}
 			verdicts = append(verdicts, v)
@@ -235,15 +235,15 @@ func lostEntity(errs []health.ErroredMeasurement, required []string) bool {
 }
 
 // failedDependency returns the first dependency of cd that evaluated Critical or
-// worse, so the batch path can name it as the cause on a verdict that only
-// restates it.
-func failedDependency(cd *health.CheckDefinition, failed map[string]bool) (string, bool) {
+// worse, with the severity it reported, so the batch path can name it as the
+// cause on a verdict that only restates it.
+func failedDependency(cd *health.CheckDefinition, failed map[string]health.Severity) (string, health.Severity, bool) {
 	for _, dep := range cd.Dependencies {
-		if failed[dep] {
-			return dep, true
+		if sev, ok := failed[dep]; ok {
+			return dep, sev, true
 		}
 	}
-	return "", false
+	return "", health.Pass, false
 }
 
 func noApplicableDetail(cd *health.CheckDefinition) string {

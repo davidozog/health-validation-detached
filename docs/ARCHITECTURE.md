@@ -131,7 +131,7 @@ The `NodeVerdict` JSON is a versioned contract. Its `schema_version` field uses 
 ## Adding a check
 
 1. Add any new signal fields to the measurement struct in `catalog/<domain>/measurement.go`. Add matching `Signal*` string constants.
-2. Write a `CheckDefinition` factory in `catalog/<domain>/`. Declare `RequiredSignals`, `Thresholds`, and `Rules` (CEL expressions referencing signal names and threshold names). Declare `Dependencies` when another check explains this one's collection failures, as the GPU and NVLink checks do for `gpu_count`.
+2. Write a `CheckDefinition` factory in `catalog/<domain>/`. Declare `RequiredSignals`, `Thresholds`, and `Rules` (CEL expressions referencing signal names and threshold names). Declare `Dependencies` when another check explains this one's *complete* failure to read an entity, as the GPU and NVLink checks do for `gpu_count`. A partial read, where only some required signals failed, is an independent fault and is not attributed.
 3. Register it in `catalog/checks.go` via `builtinChecks()`.
 4. Add a test covering the PASS path, at least one non-PASS path, and the skipped path (errored measurement).
 

@@ -1524,8 +1524,13 @@ func TestEvaluateAll_UnknownDependencyExplains(t *testing.T) {
 		if v.CheckID != "dependent" {
 			continue
 		}
-		if !strings.Contains(strings.Join(v.Messages, " "), "unknown_root") {
+		msg := strings.Join(v.Messages, " ")
+		if !strings.Contains(msg, "unknown_root") {
 			t.Errorf("messages = %v, want the Unknown dependency named", v.Messages)
+		}
+		// The severity is the dependency's own, not a hardcoded CRITICAL.
+		if !strings.Contains(msg, "itself UNKNOWN") {
+			t.Errorf("messages = %v, want the dependency's actual severity", v.Messages)
 		}
 		return
 	}

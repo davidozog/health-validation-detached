@@ -12,7 +12,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `DEPENDENCY_SKIPPED`; that no longer happens, because checks never read each
   other's results, so a dependency that did not run says nothing about whether
   its dependents can be evaluated. A dependent whose own signals are readable
-  now always evaluates. Nothing emits `DEPENDENCY_SKIPPED` any more; the enum
+  now always evaluates, provided it passes its own prerequisites: architecture,
+  execution context, disabled state and required thresholds all still skip it. Nothing emits `DEPENDENCY_SKIPPED` any more; the enum
   value is retained for compatibility. The field's Go type and JSON shape are
   unchanged, so this is a behavior change rather than a compile break.
   `schema_version` stays `0.2`.
