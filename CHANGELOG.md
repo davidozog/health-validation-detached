@@ -3,6 +3,28 @@
 All notable changes to NVIDIA Health Validation are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Breaking Changes
+
+- `health.CheckDefinition.Dependencies` no longer cascades. Previously a
+  dependency that was **skipped** skipped its dependents with
+  `DEPENDENCY_SKIPPED`; that no longer happens, because checks never read each
+  other's results, so a dependency that did not run says nothing about whether
+  its dependents can be evaluated. A dependent whose own signals are readable
+  now always evaluates. Nothing emits `DEPENDENCY_SKIPPED` any more; the enum
+  value is retained for compatibility. The field's Go type and JSON shape are
+  unchanged, so this is a behavior change rather than a compile break.
+  `schema_version` stays `0.2`.
+
+### Features
+
+- The ten GPU and NVLink checks that read NVIDIA's per-device enumeration now
+  declare `Dependencies: ["gpu_count"]`. When a device falls off the bus, each
+  dependent's collection failure names `gpu_count` as the cause instead of
+  reading as an independent fault. Applies on GB200/GB300, where `gpu_count`
+  applies.
+
 ## [catalog/v0.2.0] and [toolkit/v0.2.0] - 2026-09-17
 
 Covers everything since `catalog/v0.1.0` and `toolkit/v0.1.0`. Build, CI,

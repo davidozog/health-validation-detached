@@ -113,7 +113,7 @@
           "type": "string"
         },
         "messages": {
-          "description": "One entry per matching rule, describing the detected condition.",
+          "description": "One entry per matching rule, describing the detected condition. A verdict for a measurement that could not be collected carries a single entry prefixed \"measurement unavailable: \" instead, which may also name a dependency that explains it.",
           "type": "array",
           "items": { "type": "string" }
         },
@@ -204,7 +204,7 @@
       "enum": ["NODE", "DOMAIN", "CLUSTER"]
     },
     "skipReason": {
-      "description": "Machine-readable code for why a check did not run.",
+      "description": "Machine-readable code for why a check did not run. DEPENDENCY_SKIPPED and INSUFFICIENT_HISTORY are reserved; no current check emits them.",
       "type": "string",
       "enum": [
         "NOT_SKIPPED",

@@ -122,7 +122,7 @@ The `NodeVerdict` JSON is a versioned contract. Its `schema_version` field uses 
 | SIGNAL_UNAVAILABLE_ARCHITECTURE | Check does not apply to this GPU architecture. |
 | SIGNAL_UNAVAILABLE_DEPLOYMENT_MODEL | Check requires a different execution context. |
 | CHECK_DISABLED | Operator explicitly disabled this check. |
-| DEPENDENCY_SKIPPED | A prerequisite check was skipped or failed. |
+| DEPENDENCY_SKIPPED | Reserved; no current check emits it. A dependency that did not run has no effect, and one that reported CRITICAL is named as the cause on its dependents' collection failures rather than skipping them. |
 | INSUFFICIENT_HISTORY | Time-window data not yet accumulated. Applies only to checks that evaluate over a window; not used by any currently registered check. |
 | THRESHOLD_UNCONFIGURED | A threshold the operator must supply was not configured. |
 | NO_APPLICABLE_MEASUREMENT | The category was collected, but no measurement in it carries the check's required signals. Routing is by measurement schema, so a measurement that carries the signals but whose sensor failed to collect one reports CRITICAL rather than skipping. |
@@ -131,7 +131,7 @@ The `NodeVerdict` JSON is a versioned contract. Its `schema_version` field uses 
 ## Adding a check
 
 1. Add any new signal fields to the measurement struct in `catalog/<domain>/measurement.go`. Add matching `Signal*` string constants.
-2. Write a `CheckDefinition` factory in `catalog/<domain>/`. Declare `RequiredSignals`, `Thresholds`, and `Rules` (CEL expressions referencing signal names and threshold names).
+2. Write a `CheckDefinition` factory in `catalog/<domain>/`. Declare `RequiredSignals`, `Thresholds`, and `Rules` (CEL expressions referencing signal names and threshold names). Declare `Dependencies` when another check explains this one's collection failures, as the GPU and NVLink checks do for `gpu_count`.
 3. Register it in `catalog/checks.go` via `builtinChecks()`.
 4. Add a test covering the PASS path, at least one non-PASS path, and the skipped path (errored measurement).
 

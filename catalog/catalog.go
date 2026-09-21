@@ -237,7 +237,8 @@ func (c *Catalog) requireArchitecture() error {
 	return nil
 }
 
-// Evaluate runs a single check against a typed measurement.
+// Evaluate runs a single check against a typed measurement. It evaluates that
+// check alone, so [health.CheckDefinition.Dependencies] has no effect here.
 func (c *Catalog) Evaluate(checkID string, m health.Measurement) (health.CheckVerdict, error) {
 	if err := c.requireArchitecture(); err != nil {
 		return health.CheckVerdict{}, err
@@ -289,13 +290,12 @@ func (c *Catalog) EvaluateAll(measurements ...health.Measurement) (health.NodeVe
 // not carry.
 //
 // A check whose category supplied no measurement at all is skipped
-// [health.SensorMissing], with the category named in SkipDetail and
-// dependents cascading to DependencySkipped. Registering a check is what
-// declares the expectation that its sensor exists, so this needs no
-// configuration: a domain that reports nothing is reported as unassessed
-// rather than dropped. The measurement-independent reasons are decided
-// first, so an operator's CHECK_DISABLED still wins — a check turned off
-// on purpose does not read as a sensor hole.
+// [health.SensorMissing], with the category named in SkipDetail.
+// Registering a check is what declares the expectation that its sensor
+// exists, so this needs no configuration: a domain that reports nothing is
+// reported as unassessed rather than dropped. The measurement-independent
+// reasons are decided first, so an operator's CHECK_DISABLED still wins: a
+// check turned off on purpose does not read as a sensor hole.
 //
 // A caller evaluating a single domain therefore receives SensorMissing
 // skips for the others. That is a report, not a failure: skips do not

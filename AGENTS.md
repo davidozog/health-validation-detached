@@ -187,7 +187,7 @@ The binary's exit code is a coarse health signal set by `toolkit/app`: 0 for PAS
 #### Adding a check
 
 1. Define signals on the relevant measurement struct in `catalog/<domain>/measurement.go` (e.g. add a field + `Signal*` constant to `gpu.GPUMeasurement`).
-2. Write a `CheckDefinition` factory in the same `catalog/<domain>/` package.
+2. Write a `CheckDefinition` factory in the same `catalog/<domain>/` package. Add `Dependencies` only when another check explains this one's collection failures.
 3. Register it in `catalog/checks.go` via `builtinChecks()`.
 
 #### Sensors vs. backends
@@ -230,6 +230,8 @@ When adding a direct third-party dep here (this is how `gopkg.in/yaml.v3` arrive
 **Threshold governance** — `ThresholdCategory` controls whether operators can override a threshold: `DefaultThreshold` (overridable), `FixedThreshold` (never overridable, enforced at `OverrideSet` construction), `AdjustableThreshold` (overridable within bounds). Violations return `FixedThresholdError`.
 
 **Enum handling** — all enums use the generic `marshalEnum[T]` / `unmarshalEnum[T]` helpers in `catalog/health/enum.go`. Follow the same pattern for new enums.
+
+**Check dependencies** — `Dependencies` declares that another check's Critical verdict explains this one's inability to collect. It is not a prerequisite relation: checks never read each other's results, so a dependency that did not run has no effect, and a dependent whose signals are readable always evaluates. Its only effect is naming the cause on a verdict for an entity this check could not read at all, which requires the collection errors to cover every `RequiredSignal`. A dependent may declare architectures its dependency lacks, so the built-in edges only take effect on GB200/GB300 where `gpu_count` applies.
 
 **BUILD files** — Gazelle manages `BUILD.bazel` files. After adding or removing `.go` files or changing imports, run `bazel run //tools/gazelle` to regenerate. Do not hand-edit dep lists that Gazelle owns.
 

@@ -312,7 +312,7 @@ const (
 	ArchitectureUnsupported                   // Wrong GPU architecture.
 	DeploymentUnsupported                     // Requires different execution context.
 	CheckDisabled                             // Operator disabled this check.
-	DependencySkipped                         // Prerequisite check was skipped.
+	DependencySkipped                         // Reserved; no current check emits it.
 	InsufficientHistory                       // Time-window data not yet available.
 	ThresholdUnconfigured                     // Required threshold not supplied for this fleet.
 	NoApplicableMeasurement                   // No supplied measurement carries the check's required signals.
