@@ -26,7 +26,7 @@ type Catalog struct {
 	disabledChecks   map[string]bool
 	evaluationEngine *evaluation.EvaluationEngine
 	overrides        OverrideSet
-	architecture     string
+	host             health.Host
 	executionContext health.ExecutionContext
 	mu               sync.RWMutex
 }
@@ -66,7 +66,7 @@ var ErrArchitectureUnset = errors.New("architecture must be set via WithArchitec
 // Evaluate requires a non-empty architecture; omitting this option is valid
 // for List/Overrides but fails closed at evaluation.
 func WithArchitecture(arch string) Option {
-	return func(c *Catalog) { c.architecture = arch }
+	return func(c *Catalog) { c.host.Architecture = arch }
 }
 
 // WithExecutionContext sets the deployment position. Checks that
@@ -204,7 +204,7 @@ type paramsSnapshot struct {
 	cadence          *health.SchedulingCadence
 	disabledChecks   map[string]bool
 	overrides        OverrideSet
-	architecture     string
+	host             health.Host
 	executionContext health.ExecutionContext
 }
 
@@ -215,7 +215,7 @@ type paramsSnapshot struct {
 // disabled checks.
 func (s paramsSnapshot) forCheck(checkID string) evaluation.Params {
 	return evaluation.Params{
-		Architecture:     s.architecture,
+		Host:             s.host,
 		ExecutionContext: s.executionContext,
 		Disabled:         s.disabledChecks[checkID],
 		Overrides:        s.overrides.ForCheck(checkID),
@@ -233,7 +233,7 @@ func (c *Catalog) snapshotParams() paramsSnapshot {
 	return paramsSnapshot{
 		overrides:        c.overrides,
 		disabledChecks:   c.disabledChecks,
-		architecture:     c.architecture,
+		host:             c.host,
 		executionContext: c.executionContext,
 	}
 }
@@ -241,7 +241,7 @@ func (c *Catalog) snapshotParams() paramsSnapshot {
 func (c *Catalog) requireArchitecture() error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if c.architecture == "" {
+	if c.host.Architecture == "" {
 		return ErrArchitectureUnset
 	}
 	return nil
@@ -333,7 +333,7 @@ func (c *Catalog) evaluateAllRaw(opts EvaluationOptions, measurements ...health.
 		cadence:          opts.Cadence,
 		overrides:        c.overrides,
 		disabledChecks:   c.disabledChecks,
-		architecture:     c.architecture,
+		host:             c.host,
 		executionContext: c.executionContext,
 	}
 	c.mu.RUnlock()

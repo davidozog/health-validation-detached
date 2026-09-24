@@ -11,6 +11,7 @@ go_library(
         "driver_version.go",
         "enum.go",
         "errors.go",
+        "host.go",
         "measurement.go",
         "threshold.go",
         "verdict.go",
