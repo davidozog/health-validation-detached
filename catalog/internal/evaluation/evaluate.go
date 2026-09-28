@@ -56,7 +56,7 @@ func (e *EvaluationEngine) EvaluateCheck(cd *health.CheckDefinition, m health.Me
 	if v, isSkip := checkLevelSkip(cd, p, now); isSkip {
 		return v, nil
 	}
-	signals := ToSignals(m)
+	signals := ToSignals(m, p.Host)
 	if !routes(cd, m.Category(), signals) {
 		return skippedVerdict(cd, now, health.NoApplicableMeasurement, noApplicableDetail(cd)), nil
 	}
@@ -96,8 +96,10 @@ func (e *EvaluationEngine) EvaluateCheck(cd *health.CheckDefinition, m health.Me
 //
 // paramsFor supplies the per-check evaluation context; the engine asks
 // for fresh Params per check so overrides and disabled state stay
-// per-check, matching the single-check EvaluateCheck path.
-func (e *EvaluationEngine) EvaluateBatch(checks map[string]*health.CheckDefinition, measurements []health.Measurement, paramsFor func(checkID string) Params) ([]health.CheckVerdict, error) {
+// per-check, matching the single-check EvaluateCheck path. host is taken
+// separately because signals are extracted once per measurement, before
+// any check's Params exist; it must be the Host paramsFor reports.
+func (e *EvaluationEngine) EvaluateBatch(checks map[string]*health.CheckDefinition, measurements []health.Measurement, host health.Host, paramsFor func(checkID string) Params) ([]health.CheckVerdict, error) {
 	now := time.Now()
 
 	// Extract each measurement's signals once; every check reuses them.
@@ -110,7 +112,7 @@ func (e *EvaluationEngine) EvaluateBatch(checks map[string]*health.CheckDefiniti
 	presentCategories := make(map[health.Category]bool)
 	for i, m := range measurements {
 		cat := m.Category()
-		obs[i] = observed{ToSignals(m), m.Errors(), cat}
+		obs[i] = observed{ToSignals(m, host), m.Errors(), cat}
 		presentCategories[cat] = true
 	}
 

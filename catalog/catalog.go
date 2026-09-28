@@ -338,5 +338,5 @@ func (c *Catalog) evaluateAllRaw(opts EvaluationOptions, measurements ...health.
 	}
 	c.mu.RUnlock()
 
-	return c.evaluationEngine.EvaluateBatch(checks, measurements, snap.forCheck)
+	return c.evaluationEngine.EvaluateBatch(checks, measurements, snap.host, snap.forCheck)
 }
