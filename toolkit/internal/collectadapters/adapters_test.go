@@ -88,6 +88,9 @@ func TestGPUAdapterPreservesAbsenceInterpretation(t *testing.T) {
 		{name: "missing", failedSignal: gpu.SignalAveragePowerDrawW, obs: healthyGPUObservations()[1:]},
 		{name: "collection error", failedSignal: gpu.SignalGPUPstate, obs: replace(healthyGPUObservations(), gpusignals.PerformanceState.ID(), failedObservation(gpusignals.PerformanceState.ID(), &observation.CollectionError{Category: observation.CollectionErrorCategoryUnavailable}))},
 		{name: "no targets", failedSignal: gpu.SignalGPUPstate, obs: replace(healthyGPUObservations(), gpusignals.PerformanceState.ID(), noTargets)},
+		// Toolkit-shaped IDs are treated as neutral when unsupported; only
+		// FromMeasurements output may use them, so collect input must not.
+		{name: "toolkit-shaped unsupported", failedSignal: gpu.SignalGPUPstate, obs: replace(healthyGPUObservations(), gpusignals.PerformanceState.ID(), noValueObservation("gpu."+gpu.SignalGPUPstate, observation.NoValueReasonNotSupported))},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
