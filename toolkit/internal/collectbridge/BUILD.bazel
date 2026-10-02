@@ -19,9 +19,12 @@ go_library(
 
 go_test(
     name = "collectbridge_test",
-    srcs = ["runner_test.go"],
+    srcs = [
+        "runner_test.go",
+        "validation_internal_test.go",
+    ],
+    embed = [":collectbridge"],
     deps = [
-        ":collectbridge",
         "//catalog",
         "//catalog/cpu",
         "//catalog/health",

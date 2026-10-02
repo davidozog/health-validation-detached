@@ -15,13 +15,63 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-var canonicalGPU = func() map[string]collect.Signal {
-	out := make(map[string]collect.Signal)
-	for _, s := range gpusignals.All() {
-		out[s.ID()] = s
+// Target kinds a canonical signal's observations may describe.
+const (
+	targetNode           = "node"
+	targetGPU            = "GPU"
+	targetNVLinkEndpoint = "NVLink endpoint"
+	targetGPUPair        = "GPU pair"
+)
+
+// canonicalTargets lists the target kind each canonical signal accepts.
+// Migrating domains append entries; a later entry overrides an earlier one
+// for the same signal, so a per-link or GPU-pair signal in gpusignals is
+// declared after the whole-GPU entry. observations.targetID attributes
+// endpoint and pair targets to their source GPU, so a new kind needs a
+// matching mapping there.
+var canonicalTargets = []canonicalTarget{
+	{kind: targetGPU, signals: gpusignals.All()},
+}
+
+type canonicalTarget struct {
+	kind    string
+	signals collect.Signals
+}
+
+// canonicalRule is HV's acceptance rule for one canonical signal: its
+// definition, which fixes the unit, and its target kind.
+type canonicalRule struct {
+	signal collect.Signal
+	target string
+}
+
+var canonical = canonicalIndex(canonicalTargets)
+
+func canonicalIndex(entries []canonicalTarget) map[string]canonicalRule {
+	out := make(map[string]canonicalRule)
+	for _, entry := range entries {
+		for _, s := range entry.signals {
+			out[s.ID()] = canonicalRule{signal: s, target: entry.kind}
+		}
 	}
 	return out
-}()
+}
+
+// targetKind names the kind of a typed target, or "" for none.
+func targetKind(target *observation.ObservationTarget) string {
+	switch target.GetKind().(type) {
+	case *observation.ObservationTarget_Node:
+		return targetNode
+	case *observation.ObservationTarget_GPU:
+		return targetGPU
+	case *observation.ObservationTarget_NVLinkEndpoint:
+		return targetNVLinkEndpoint
+	case *observation.ObservationTarget_GPUPair:
+		return targetGPUPair
+	default:
+		return ""
+	}
+}
 
 // sameCollectUnit treats a nil unit and an empty unit as different.
 func sameCollectUnit(a, b *string) bool {
@@ -34,7 +84,7 @@ func validateCollectDefinition(s collect.Signal) error {
 	if s == nil || strings.TrimSpace(s.ID()) == "" {
 		return fmt.Errorf("nonempty signal ID is required")
 	}
-	if canonical := canonicalGPU[s.ID()]; canonical != nil && !sameCollectUnit(s.Unit(), canonical.Unit()) {
+	if rule, ok := canonical[s.ID()]; ok && !sameCollectUnit(s.Unit(), rule.signal.Unit()) {
 		return fmt.Errorf("signal %q redefines its canonical unit", s.ID())
 	}
 	return nil
@@ -83,10 +133,11 @@ func validateCollectBatch(batch *observation.ObservationBatch, cycleID string, o
 
 // validateCollectObservation applies HV's acceptance rules to one observation:
 // provenance, a past timestamp, canonical unit, a valid target, exactly one
-// outcome, and, for canonical GPU signals, a GPU target. Whether a value's
-// kind fits a signal is left to the adapter that interprets it, so a wrong
-// scalar fails only the checks that read it. These rules live here rather
-// than in collect so its contract is unchanged for other consumers.
+// outcome, and, for canonical signals, the target kind in canonicalTargets.
+// Whether a value's kind fits a signal is left to the adapter that interprets
+// it, so a wrong scalar fails only the checks that read it. These rules live
+// here rather than in collect so its contract is unchanged for other
+// consumers.
 func validateCollectObservation(o *observation.Observation, s collect.Signal) error {
 	if strings.TrimSpace(o.GetSource()) == "" {
 		return fmt.Errorf("source is required")
@@ -159,15 +210,8 @@ func validateCollectObservation(o *observation.Observation, s collect.Signal) er
 	default:
 		return fmt.Errorf("observation outcome is required")
 	}
-	if canonicalGPU[s.ID()] == nil {
-		return nil
-	}
-	// Every canonical GPU signal is whole-GPU today. Before consuming a
-	// per-link or GPU-pair one, move this rule into the canonical mappings
-	// in the same change: observations.targetID attributes endpoint and pair
-	// targets to their source GPU, so dropping it alone would misattribute.
-	if o.GetTarget() != nil && o.GetTarget().GetGpu() == nil {
-		return fmt.Errorf("signal %q requires a GPU target", s.ID())
+	if rule, ok := canonical[s.ID()]; ok && o.GetTarget() != nil && targetKind(o.GetTarget()) != rule.target {
+		return fmt.Errorf("signal %q requires a %s target", s.ID(), rule.target)
 	}
 	return nil
 }

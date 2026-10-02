@@ -132,8 +132,8 @@ func (r *Runner) Observe(ctx context.Context, signalIDs ...string) []*observatio
 		want[id] = true
 		if r.owner[id] == nil {
 			s := collect.NewSignal(id, "")
-			if canonical := canonicalGPU[id]; canonical != nil {
-				s = canonical
+			if rule, ok := canonical[id]; ok {
+				s = rule.signal
 			}
 			failure := collectFailure(s, "toolkit", fmt.Errorf("no collect sensor is registered for signal %q", id))
 			failure.GetCollectionError().Category = observation.CollectionErrorCategoryNotConfigured
