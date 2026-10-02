@@ -500,13 +500,11 @@ func TestCollectRunnerPreparationHonorsToolkitTimeout(t *testing.T) {
 	}
 }
 
-func TestCollectRunnerCanonicalScalarAndTargetRules(t *testing.T) {
-	for _, name := range []string{"wrong scalar", "wrong target", "NVLink endpoint", "GPU pair", "unverified value"} {
+func TestCollectRunnerCanonicalTargetRules(t *testing.T) {
+	for _, name := range []string{"wrong target", "NVLink endpoint", "GPU pair", "unverified value"} {
 		t.Run(name, func(t *testing.T) {
 			o := runnerObservation(gpusignals.PerformanceState, observation.GPUTarget("GPU-1"), 0)
 			switch name {
-			case "wrong scalar":
-				o.GetValue().Kind = &observation.Value_BoolValue{BoolValue: false}
 			case "wrong target":
 				o.Target = observation.NodeTarget("")
 			case "NVLink endpoint":

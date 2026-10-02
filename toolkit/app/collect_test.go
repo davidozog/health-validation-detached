@@ -764,6 +764,7 @@ var (
 // collectHardwareSensor emits healthy canonical GPU observations for each of
 // gpuIDs, restricted to the selected signals.
 type collectHardwareSensor struct {
+	values  map[string]*observation.Value // per-signal overrides
 	id      string
 	cycles  []*collect.Cycle
 	signals collect.Signals
@@ -809,6 +810,9 @@ func (s *collectHardwareSensor) Measure(_ context.Context, opts ...collect.OpOpt
 			case gpusignals.FabricManagerStatus.ID():
 				value.Kind = &observation.Value_IntValue{IntValue: gpusignals.FabricManagerStatusSuccess}
 			}
+			if override, ok := s.values[signal.ID()]; ok {
+				value = override
+			}
 			batch.Observations = append(batch.Observations, &observation.Observation{
 				SignalId: signal.ID(), Source: s.ID(), Target: observation.GPUTarget(gpuID),
 				ObservedAt: timestamppb.Now(), Unit: signal.Unit(),
@@ -817,6 +821,76 @@ func (s *collectHardwareSensor) Measure(_ context.Context, opts ...collect.OpOpt
 		}
 	}
 	return batch, nil
+}
+
+func TestWithCollectWrongScalarFailsOnlyDependentChecks(t *testing.T) {
+	wrong := &observation.Value{Kind: &observation.Value_BoolValue{BoolValue: true}}
+	gb200Limit := &observation.Value{Kind: &observation.Value_DoubleValue{DoubleValue: 1200}}
+	source := &collectHardwareSensor{values: map[string]*observation.Value{
+		gpusignals.PerformanceState.ID():    wrong,
+		gpusignals.FabricManagerStatus.ID(): wrong,
+		gpusignals.PowerLimitRequested.ID(): gb200Limit,
+		gpusignals.PowerLimitEnforced.ID():  gb200Limit,
+	}}
+	sensors, err := New().WithCollect(source).WithCollectAdapters(collectadapters.GPU(), collectadapters.NVLink()).collectSensors(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unmapped catalog fields always fail, so assert on the mapped ones only.
+	var failed []string
+	for _, sensor := range sensors {
+		measurements, measureErr := sensor.Measure(context.Background())
+		if measureErr != nil {
+			t.Fatal(measureErr)
+		}
+		for _, m := range measurements {
+			for _, e := range m.Errors() {
+				failed = append(failed, e.FailedSignals()...)
+			}
+		}
+	}
+	for _, signal := range []string{gpu.SignalGPUPstate, nvlink.SignalFabricRegistrationIncomplete, nvlink.SignalFabricRegistrationFailed} {
+		if !slices.Contains(failed, signal) {
+			t.Errorf("wrong scalar did not fail %s: %v", signal, failed)
+		}
+	}
+	for _, signal := range []string{gpu.SignalPowerLimitW, gpu.SignalHWSlowdown, nvlink.SignalFabricRouteUnhealthy} {
+		if slices.Contains(failed, signal) {
+			t.Errorf("valid sibling %s failed: %v", signal, failed)
+		}
+	}
+	cat := catalog.NewEmpty(catalog.WithArchitecture("GB200"), catalog.WithExecutionContext(health.OperatorInfra))
+	for _, check := range []health.CheckDefinition{
+		gpu.GPUPowerState(), gpu.GPUPowerLimit(), gpu.GPUSensorThrottle(),
+		nvlink.NVLinkFabric(), nvlink.NVLinkFabricHealth(),
+	} {
+		if err = cat.Register(check); err != nil {
+			t.Fatal(err)
+		}
+	}
+	verdict, err := toolkit.Collect(cat, sensors...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.calls != 1 || len(verdict.CheckResults) != 5 || len(verdict.SkippedChecks) != 0 {
+		t.Fatalf("calls=%d verdict=%+v", source.calls, verdict)
+	}
+	failing := map[string]string{
+		"gpu_power_state": gpusignals.PerformanceState.ID(),
+		"nvlink_fabric":   gpusignals.FabricManagerStatus.ID(),
+	}
+	for _, check := range verdict.CheckResults {
+		signal, wantFail := failing[check.CheckID]
+		if !wantFail {
+			if check.Severity != health.Pass {
+				t.Errorf("unrelated check %s=%+v", check.CheckID, check)
+			}
+			continue
+		}
+		if check.Severity == health.Pass || !strings.Contains(strings.Join(check.Messages, " "), signal) {
+			t.Errorf("check %s did not fail on its wrong scalar: %+v", check.CheckID, check)
+		}
+	}
 }
 
 func TestWithCollectRegistersReusableDomainAdapters(t *testing.T) {

@@ -84,9 +84,10 @@ func validateCollectBatch(batch *observation.ObservationBatch, cycleID string, o
 
 // validateCollectObservation applies HV's acceptance rules to one observation:
 // provenance, a past timestamp, canonical unit, a valid target, exactly one
-// outcome, and, for canonical GPU signals, a GPU target and declared value kind.
-// These rules live here rather than in collect so its contract is unchanged
-// for other consumers.
+// outcome, and, for canonical GPU signals, a GPU target. Whether a value's
+// kind fits a signal is left to the adapter that interprets it, so a wrong
+// scalar fails only the checks that read it. These rules live here rather
+// than in collect so its contract is unchanged for other consumers.
 func validateCollectObservation(o *observation.Observation, s collect.Signal) error {
 	if strings.TrimSpace(o.GetSource()) == "" {
 		return fmt.Errorf("source is required")
@@ -164,24 +165,6 @@ func validateCollectObservation(o *observation.Observation, s collect.Signal) er
 	}
 	if o.GetTarget() != nil && o.GetTarget().GetGpu() == nil {
 		return fmt.Errorf("signal %q requires a GPU target", s.ID())
-	}
-	if value := o.GetValue(); value != nil {
-		kind, declared := collectValueKinds[s.ID()]
-		if !declared {
-			return fmt.Errorf("signal %q has no declared value kind", s.ID())
-		}
-		valid := false
-		switch value.GetKind().(type) {
-		case *observation.Value_IntValue:
-			valid = kind == kindInt || kind == kindNumeric
-		case *observation.Value_DoubleValue:
-			valid = kind == kindDouble || kind == kindNumeric
-		case *observation.Value_BoolValue:
-			valid = kind == kindBool
-		}
-		if !valid {
-			return fmt.Errorf("signal %q requires a %s value", s.ID(), kind)
-		}
 	}
 	return nil
 }

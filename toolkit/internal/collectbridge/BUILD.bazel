@@ -5,7 +5,6 @@ go_library(
     srcs = [
         "runner.go",
         "validation.go",
-        "value_kinds.go",
     ],
     importpath = "github.com/dsx-ai-factory/health-validation/toolkit/internal/collectbridge",
     visibility = ["//toolkit:__subpackages__"],
@@ -20,12 +19,9 @@ go_library(
 
 go_test(
     name = "collectbridge_test",
-    srcs = [
-        "runner_test.go",
-        "value_kinds_test.go",
-    ],
-    embed = [":collectbridge"],
+    srcs = ["runner_test.go"],
     deps = [
+        ":collectbridge",
         "//catalog",
         "//catalog/cpu",
         "//catalog/health",
