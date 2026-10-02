@@ -236,7 +236,6 @@ func (r *Runner) measure(ctx context.Context, e *collectEntry) (batch *observati
 	return batch
 }
 
-// failed reports err for every signal e owns.
 func (r *Runner) failed(e *collectEntry, err error) *observation.ObservationBatch {
 	batch := &observation.ObservationBatch{CollectionId: r.cycle.CollectionID()}
 	for _, s := range e.signals {
@@ -269,7 +268,6 @@ type Sensor struct {
 
 func (s *Sensor) Name() string { return s.binding.Name }
 
-// Measure builds measurements from cached observations for the bound signals.
 func (s *Sensor) Measure(ctx context.Context) ([]health.Measurement, error) {
 	return s.binding.Build(s.runner.Observe(ctx, s.binding.Signals...)), nil
 }

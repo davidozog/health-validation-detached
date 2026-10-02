@@ -71,7 +71,6 @@ func (a *domainAdapter) Build(obs []*observation.Observation) []health.Measureme
 	return measurements
 }
 
-// Errored reports err against every catalog signal of the category.
 func (a *domainAdapter) Errored(err error) []health.Measurement {
 	if a.category == health.GPU {
 		return []health.Measurement{gpu.ErroredGPU(sourceLevelGPU, err, gpu.MeasurementSignals...)}

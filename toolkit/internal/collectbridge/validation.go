@@ -15,7 +15,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// canonicalGPU indexes collect's canonical GPU signals by ID.
 var canonicalGPU = func() map[string]collect.Signal {
 	out := make(map[string]collect.Signal)
 	for _, s := range gpusignals.All() {
