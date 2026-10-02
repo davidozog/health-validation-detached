@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// canonicalGPU indexes collect's canonical GPU signals by ID.
 var canonicalGPU = func() map[string]collect.Signal {
 	out := make(map[string]collect.Signal)
 	for _, s := range gpusignals.All() {
@@ -23,10 +24,13 @@ var canonicalGPU = func() map[string]collect.Signal {
 	return out
 }()
 
+// sameCollectUnit treats a nil unit and an empty unit as different.
 func sameCollectUnit(a, b *string) bool {
 	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
 }
 
+// validateCollectDefinition rejects empty IDs and canonical signals declared
+// with a different unit.
 func validateCollectDefinition(s collect.Signal) error {
 	if s == nil || strings.TrimSpace(s.ID()) == "" {
 		return fmt.Errorf("nonempty signal ID is required")
@@ -37,6 +41,10 @@ func validateCollectDefinition(s collect.Signal) error {
 	return nil
 }
 
+// validateCollectBatch checks cycle identity, signal ownership, and every
+// observation. Duplicates are keyed by signal and target; source-scoped and
+// source-local targets also key on source, since their identity is only
+// meaningful within it.
 func validateCollectBatch(batch *observation.ObservationBatch, cycleID string, owned collect.Signals) error {
 	if batch == nil {
 		return fmt.Errorf("observation batch is required")
@@ -74,6 +82,11 @@ func validateCollectBatch(batch *observation.ObservationBatch, cycleID string, o
 	return nil
 }
 
+// validateCollectObservation applies HV's acceptance rules to one observation:
+// provenance, a past timestamp, canonical unit, a valid target, exactly one
+// outcome, and, for canonical GPU signals, a GPU target and declared value kind.
+// These rules live here rather than in collect so its contract is unchanged
+// for other consumers.
 func validateCollectObservation(o *observation.Observation, s collect.Signal) error {
 	if strings.TrimSpace(o.GetSource()) == "" {
 		return fmt.Errorf("source is required")
@@ -173,6 +186,8 @@ func validateCollectObservation(o *observation.Observation, s collect.Signal) er
 	return nil
 }
 
+// validateCollectTarget accepts a nil (source-scoped) target or one typed
+// target with valid GPU identities.
 func validateCollectTarget(target *observation.ObservationTarget) error {
 	if target == nil {
 		return nil
@@ -206,6 +221,7 @@ func validateCollectTarget(target *observation.ObservationTarget) error {
 	return nil
 }
 
+// validateCollectGPURef requires exactly one of UUID or source-local slot ID.
 func validateCollectGPURef(ref *observation.GPURef) error {
 	if ref == nil || (strings.TrimSpace(ref.GetUuid()) == "") == (strings.TrimSpace(ref.GetSourceLocalId()) == "") {
 		return fmt.Errorf("GPU target requires exactly one UUID or source-local ID")
@@ -213,6 +229,7 @@ func validateCollectGPURef(ref *observation.GPURef) error {
 	return nil
 }
 
+// collectSourceLocal reports whether any GPU in target lacks a UUID.
 func collectSourceLocal(target *observation.ObservationTarget) bool {
 	return target.GetGpu().GetSourceLocalId() != "" || target.GetNvLinkEndpoint().GetGpu().GetSourceLocalId() != "" || target.GetGpuPair().GetSourceGpu().GetSourceLocalId() != "" || target.GetGpuPair().GetPeerGpu().GetSourceLocalId() != ""
 }

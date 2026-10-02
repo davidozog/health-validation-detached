@@ -5,12 +5,13 @@ package collectbridge
 
 import gpusignals "github.com/dsx-ai-factory/health-validation/collect/signals/gpu"
 
+// collectValueKind is the value type HV accepts for a canonical signal.
 type collectValueKind uint8
 
 const (
 	kindInt collectValueKind = iota
 	kindDouble
-	kindNumeric
+	kindNumeric // int or double
 	kindBool
 )
 

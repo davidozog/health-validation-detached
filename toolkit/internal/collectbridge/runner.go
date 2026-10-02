@@ -36,6 +36,7 @@ type Runner struct {
 	entries []*collectEntry
 }
 
+// collectEntry is one registered source and its run-once result cache.
 type collectEntry struct {
 	sensor    collect.Sensor
 	batch     *observation.ObservationBatch
@@ -159,6 +160,9 @@ func (r *Runner) Observe(ctx context.Context, signalIDs ...string) []*observatio
 	return out
 }
 
+// observe starts e at most once and waits for its batch. If ctx expires first,
+// the failure is cached and the source canceled, so a late result can never
+// replace it.
 func (r *Runner) observe(ctx context.Context, e *collectEntry) *observation.ObservationBatch {
 	e.once.Do(func() {
 		callCtx, cancel := context.WithCancel(ctx)
@@ -182,10 +186,14 @@ func (r *Runner) observe(ctx context.Context, e *collectEntry) *observation.Obse
 	}
 }
 
+// complete caches batch if e has no result yet; the first completion wins.
 func (e *collectEntry) complete(batch *observation.ObservationBatch) {
 	e.completed.Do(func() { e.batch = batch; close(e.ready) })
 }
 
+// measure runs e under the sequential gate and validates its batch as a whole.
+// A top-level source error replaces untargeted successes for the same signal
+// and is appended for signals the batch omitted, keeping valid partial data.
 func (r *Runner) measure(ctx context.Context, e *collectEntry) (batch *observation.ObservationBatch) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -228,6 +236,7 @@ func (r *Runner) measure(ctx context.Context, e *collectEntry) (batch *observati
 	return batch
 }
 
+// failed reports err for every signal e owns.
 func (r *Runner) failed(e *collectEntry, err error) *observation.ObservationBatch {
 	batch := &observation.ObservationBatch{CollectionId: r.cycle.CollectionID()}
 	for _, s := range e.signals {
@@ -236,6 +245,8 @@ func (r *Runner) failed(e *collectEntry, err error) *observation.ObservationBatc
 	return batch
 }
 
+// collectFailure builds a source-scoped error observation, classifying both
+// collect and toolkit deadline errors as timeouts.
 func collectFailure(s collect.Signal, source string, err error) *observation.Observation {
 	o := observation.NewErrorObservation(s.ID(), s.Unit(), source, "Measure", err)
 	if errors.Is(err, collect.ErrCollectionTimeout) || errors.Is(err, health.ErrCollectionTimeout) {
@@ -257,12 +268,17 @@ type Sensor struct {
 }
 
 func (s *Sensor) Name() string { return s.binding.Name }
+
+// Measure builds measurements from cached observations for the bound signals.
 func (s *Sensor) Measure(ctx context.Context) ([]health.Measurement, error) {
 	return s.binding.Build(s.runner.Observe(ctx, s.binding.Signals...)), nil
 }
+
 func (s *Sensor) Errored(err error) []health.Measurement { return s.binding.Errored(err) }
 
-// Prepare fills the shared cache under each source's timeout budget.
+// Prepare fills the shared cache under each source's timeout budget. It
+// prepares every registered source, not just this binding's; the run-once
+// cache makes later calls no-ops.
 func (s *Sensor) Prepare(timeout time.Duration) {
 	for _, e := range s.runner.entries {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -271,10 +287,14 @@ func (s *Sensor) Prepare(timeout time.Duration) {
 	}
 }
 
+// runnerSignal snapshots a declared signal so a producer cannot change its ID
+// or unit after registration.
 type runnerSignal struct {
 	unit *string
 	id   string
 }
 
-func (s runnerSignal) ID() string    { return s.id }
+func (s runnerSignal) ID() string { return s.id }
+
+// Unit returns the snapshotted unit; nil and an empty unit are distinct.
 func (s runnerSignal) Unit() *string { return s.unit }

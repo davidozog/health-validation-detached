@@ -56,6 +56,9 @@ func (a *App) WithCollectAdapters(adapters ...CollectAdapter) *App {
 	return a
 }
 
+// collectSensors resolves registered sensors and adapters into toolkit sensors
+// sharing one collect cycle for this run. Registration errors and panics are
+// returned so the CLI exits 2 before anything is measured.
 func (a *App) collectSensors(timeout time.Duration) (sensors []toolkit.Sensor, err error) {
 	if len(a.collectSources) == 0 && len(a.collectAdapters) == 0 {
 		return nil, nil
@@ -79,7 +82,7 @@ func (a *App) collectSensors(timeout time.Duration) (sensors []toolkit.Sensor, e
 	var bindings []collectbridge.Binding
 	for _, declared := range a.collectAdapters {
 		if isNilCollectInput(declared) {
-			return nil, fmt.Errorf("collect adapter is required")
+			return nil, fmt.Errorf("registered collect adapter cannot be nil")
 		}
 		name, signals := declared.Name(), declared.Signals()
 		if strings.TrimSpace(name) == "" || len(signals) == 0 {
@@ -102,7 +105,7 @@ func (a *App) collectSensors(timeout time.Duration) (sensors []toolkit.Sensor, e
 	}
 	for _, source := range a.collectSources {
 		if isNilCollectInput(source) {
-			return nil, fmt.Errorf("collect sensor is required")
+			return nil, fmt.Errorf("registered collect sensor cannot be nil")
 		}
 		if err := runner.Register(source, requested...); err != nil {
 			return nil, err
@@ -114,6 +117,10 @@ func (a *App) collectSensors(timeout time.Duration) (sensors []toolkit.Sensor, e
 	return sensors, nil
 }
 
+// isNilCollectInput also rejects typed nils. Toolkit calls Errored outside any
+// recover, so a nil adapter whose Name and Signals ignore the receiver would
+// pass registration and crash the run. IsNil panics on non-nilable kinds, hence
+// the kind check.
 func isNilCollectInput(input any) bool {
 	if input == nil {
 		return true

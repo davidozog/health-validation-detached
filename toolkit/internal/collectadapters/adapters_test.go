@@ -130,6 +130,7 @@ func healthyNVLinkObservations() []*observation.Observation {
 	}
 }
 
+// replace returns observations with signalID's observation swapped for with.
 func replace(observations []*observation.Observation, signalID string, with *observation.Observation) []*observation.Observation {
 	for i, o := range observations {
 		if o.GetSignalId() == signalID {
@@ -168,6 +169,7 @@ func noValueObservation(signalID string, reason observation.NoValueReason) *obse
 	return o
 }
 
+// only asserts measurements holds exactly one M and returns it.
 func only[M health.Measurement](t *testing.T, measurements []health.Measurement) M {
 	t.Helper()
 	var found []M

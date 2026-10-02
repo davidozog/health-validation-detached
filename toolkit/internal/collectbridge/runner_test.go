@@ -25,6 +25,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// runnerSource is a collect.Sensor whose Measure is supplied per test.
 type runnerSource struct {
 	measure func(context.Context, *collect.Op) (*observation.ObservationBatch, error)
 	id      string
@@ -65,6 +66,8 @@ func registerRunner(t *testing.T, r *collectbridge.Runner, s runnerSource) {
 	}
 }
 
+// countAdapter sums count observations into a node GPU count and records
+// failures and empty collections as errors.
 func countAdapter(signals ...string) collectbridge.Binding {
 	return collectbridge.Binding{Name: "node", Signals: signals, Build: func(obs []*observation.Observation) []health.Measurement {
 		m := node.NodeMeasurement{}
@@ -421,20 +424,18 @@ func TestCollectRunnerPreservesEarlierResultAfterLaterTimeout(t *testing.T) {
 }
 
 func TestCollectRunnerPreparationUsesPerSourceBudgets(t *testing.T) {
-	const timeout = 100 * time.Millisecond
-	const delay = 65 * time.Millisecond
-	r := newCollectRunner(t, time.Second)
+	const timeout = time.Second
+	r := newCollectRunner(t, 10*time.Second)
 	other := collect.NewSignal("private.other", "1")
-	var order []string
+	deadlines := make(chan time.Time, 2)
+	// Neither source blocks, so both complete before Collect returns. Each
+	// budget starts when its source is prepared: independent budgets end at
+	// distinct instants, a shared budget at the same one.
 	for _, s := range []collect.Signal{runnerCount, other} {
 		current := s
 		registerRunner(t, r, runnerSource{id: s.ID(), signals: collect.Signals{s}, measure: func(ctx context.Context, op *collect.Op) (*observation.ObservationBatch, error) {
-			deadline, ok := ctx.Deadline()
-			if !ok || time.Until(deadline) > timeout {
-				t.Errorf("source deadline not capped by toolkit budget")
-			}
-			order = append(order, current.ID())
-			time.Sleep(delay)
+			deadline, _ := ctx.Deadline()
+			deadlines <- deadline
 			return runnerBatch(runnerObservation(current, observation.NodeTarget(""), 2))(ctx, op)
 		}})
 	}
@@ -446,27 +447,56 @@ func TestCollectRunnerPreparationUsesPerSourceBudgets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(order) != 2 || order[0] != runnerCount.ID() || order[1] != other.ID() || len(verdict.CheckResults) != 1 || verdict.CheckResults[0].Severity != health.Pass {
-		t.Fatalf("independent source budgets shared: order=%v verdict=%+v", order, verdict)
+	// Each budget began before Collect returned, so it ends within one timeout.
+	limit := time.Now().Add(timeout)
+	if len(deadlines) != 2 {
+		t.Fatalf("sources measured=%d, want 2; verdict=%+v", len(deadlines), verdict)
+	}
+	first, second := <-deadlines, <-deadlines
+	if first.IsZero() || second.After(limit) || !second.After(first) {
+		t.Fatalf("source budgets not independent and capped: first=%s second=%s", first, second)
+	}
+	if len(verdict.CheckResults) != 1 || verdict.CheckResults[0].Severity != health.Pass {
+		t.Fatalf("verdict=%+v", verdict)
 	}
 }
 
 func TestCollectRunnerPreparationHonorsToolkitTimeout(t *testing.T) {
+	const timeout = 50 * time.Millisecond
 	r := newCollectRunner(t, time.Second)
+	// The source ignores its context and is released only after the test, so
+	// an ignored timeout deadlocks. It reports through a buffered channel and
+	// never touches t, so it may safely outlive the test.
 	release := make(chan struct{})
 	defer close(release)
-	registerRunner(t, r, runnerSource{id: "ignores-context", signals: collect.Signals{runnerCount}, measure: func(context.Context, *collect.Op) (*observation.ObservationBatch, error) { <-release; return nil, nil }})
+	capped := make(chan bool, 1)
+	registerRunner(t, r, runnerSource{id: "ignores-context", signals: collect.Signals{runnerCount}, measure: func(ctx context.Context, _ *collect.Op) (*observation.ObservationBatch, error) {
+		deadline, ok := ctx.Deadline()
+		capped <- ok && time.Until(deadline) <= timeout
+		<-release
+		return nil, nil
+	}})
 	cat := catalog.NewEmpty(catalog.WithArchitecture("GB200"), catalog.WithExecutionContext(health.OperatorInfra))
 	if err := cat.Register(node.GPUCount()); err != nil {
 		t.Fatal(err)
 	}
-	start := time.Now()
-	verdict, err := toolkit.CollectWithOptions(cat, toolkit.CollectionOptions{Timeout: 10 * time.Millisecond}, r.Sensor(countAdapter(runnerCount.ID())))
+	verdict, err := toolkit.CollectWithOptions(cat, toolkit.CollectionOptions{Timeout: timeout}, r.Sensor(countAdapter(runnerCount.ID())))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(start) > 250*time.Millisecond || len(verdict.CheckResults) != 1 || verdict.CheckResults[0].Severity != health.Critical {
-		t.Fatalf("toolkit timeout ignored: elapsed=%s verdict=%+v", time.Since(start), verdict)
+	if len(verdict.CheckResults) != 1 || verdict.CheckResults[0].Severity != health.Critical {
+		t.Fatalf("toolkit timeout ignored: verdict=%+v", verdict)
+	}
+	if obs := r.Observe(context.Background(), runnerCount.ID()); len(obs) != 1 || obs[0].GetCollectionError().GetCategory() != observation.CollectionErrorCategoryTimeout {
+		t.Fatalf("timeout not recorded: %v", obs)
+	}
+	select {
+	case ok := <-capped:
+		if !ok {
+			t.Fatal("source deadline not capped by toolkit budget")
+		}
+	default:
+		t.Fatal("source was never started within its budget")
 	}
 }
 
@@ -495,6 +525,7 @@ func TestCollectRunnerCanonicalScalarAndTargetRules(t *testing.T) {
 	}
 }
 
+// privateUnitSignal declares a non-canonical signal with an explicit unit pointer.
 type privateUnitSignal struct {
 	unit *string
 	id   string

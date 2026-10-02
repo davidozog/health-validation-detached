@@ -71,6 +71,8 @@ func TestLegacyOnlyCollectionIsUnchangedByCollectPlumbing(t *testing.T) {
 	}
 }
 
+// collectAppSensor reports a node-scoped custom count of 4 and records each
+// cycle it is measured under.
 type collectAppSensor struct {
 	cycles []*collect.Cycle
 }
@@ -98,6 +100,7 @@ func (s *collectAppSensor) Measure(_ context.Context, opts ...collect.OpOption) 
 
 func sensorUnit() *string { unit := "1"; return &unit }
 
+// customCountMeasurement is a private node-domain measurement for custom checks.
 type customCountMeasurement struct {
 	failures []health.ErroredMeasurement
 	Count    int64 `json:"custom_count"`
@@ -106,6 +109,7 @@ type customCountMeasurement struct {
 func (customCountMeasurement) Category() health.Category             { return health.Node }
 func (m customCountMeasurement) Errors() []health.ErroredMeasurement { return m.failures }
 
+// collectAppAdapter is a value-receiver adapter built from closures.
 type collectAppAdapter struct {
 	build   func([]*observation.Observation) []health.Measurement
 	errored func(error) []health.Measurement
@@ -120,6 +124,18 @@ func (a collectAppAdapter) Build(obs []*observation.Observation) []health.Measur
 }
 func (a collectAppAdapter) Errored(err error) []health.Measurement { return a.errored(err) }
 
+// lazyNilAdapter only dereferences its receiver in Build and Errored, so a
+// typed nil passes Name and Signals and would otherwise crash in Errored.
+type lazyNilAdapter struct{ measurements []health.Measurement }
+
+func (*lazyNilAdapter) Name() string      { return "lazy" }
+func (*lazyNilAdapter) Signals() []string { return []string{customCountSignal} }
+func (a *lazyNilAdapter) Build([]*observation.Observation) []health.Measurement {
+	return a.measurements
+}
+func (a *lazyNilAdapter) Errored(error) []health.Measurement { return a.measurements }
+
+// customCountAdapter maps the custom count signal to customCountMeasurement.
 func customCountAdapter() collectAppAdapter {
 	return collectAppAdapter{
 		name:    "custom-count",
@@ -161,12 +177,14 @@ func mixedChecks() []health.CheckDefinition {
 	}
 }
 
+// checkOutcome is the comparable part of one check verdict or skip.
 type checkOutcome struct {
 	severity health.Severity
 	reason   health.SkipReason
 	skipped  bool
 }
 
+// mixedOutcomes extracts the mixed-cadence checks' outcomes from v.
 func mixedOutcomes(v health.NodeVerdict) map[string]checkOutcome {
 	result := make(map[string]checkOutcome)
 	for _, c := range append(v.CheckResults, v.SkippedChecks...) {
@@ -286,6 +304,8 @@ func TestWithCollectRegistrationOrderPreservesVerdict(t *testing.T) {
 	}
 }
 
+// countedCollectAdapter counts metadata calls to prove they are captured once
+// per run.
 type countedCollectAdapter struct {
 	CollectAdapter
 	nameCalls   int
@@ -340,6 +360,7 @@ func TestWithCollectCapturesAdapterMetadataOncePerRun(t *testing.T) {
 	}
 }
 
+// metadataCollectAdapter overrides Name or Signals, e.g. to inject panics.
 type metadataCollectAdapter struct {
 	CollectAdapter
 	name    func() string
@@ -360,6 +381,7 @@ func (a metadataCollectAdapter) Signals() []string {
 	return a.CollectAdapter.Signals()
 }
 
+// metadataCollectSensor overrides ID or Signals, e.g. to inject panics.
 type metadataCollectSensor struct {
 	collect.Sensor
 	id      func() string
@@ -412,7 +434,7 @@ func TestWithCollectReportsRegistrationPanics(t *testing.T) {
 }
 
 func TestWithCollectRejectsInvalidRegistrationsBeforeMeasuring(t *testing.T) {
-	for _, name := range []string{"nil sensor", "typed nil sensor", "nil signal", "no adapter", "nil adapter", "typed nil adapter", "incomplete adapter", "unowned signal", "duplicate producer", "duplicate adapter", "duplicate adapter across calls"} {
+	for _, name := range []string{"nil sensor", "typed nil sensor", "nil signal", "no adapter", "nil adapter", "typed nil adapter", "lazy typed nil adapter", "incomplete adapter", "unowned signal", "duplicate producer", "duplicate adapter", "duplicate adapter across calls"} {
 		t.Run(name, func(t *testing.T) {
 			sensor := &collectAppSensor{}
 			var otherCycles []*collect.Cycle
@@ -435,6 +457,9 @@ func TestWithCollectRejectsInvalidRegistrationsBeforeMeasuring(t *testing.T) {
 			case "typed nil adapter":
 				var adapter *collectAppAdapter
 				a.WithCollect(sensor).WithCollectAdapters(adapter)
+			case "lazy typed nil adapter":
+				var adapter *lazyNilAdapter
+				a.WithCollect(sensor).WithCollectAdapters(adapter)
 			case "incomplete adapter":
 				a.WithCollect(sensor).WithCollectAdapters(collectAppAdapter{})
 			case "unowned signal":
@@ -456,10 +481,10 @@ func TestWithCollectRejectsInvalidRegistrationsBeforeMeasuring(t *testing.T) {
 			if code := a.Run([]string{"run"}, &stdout, &stderr); code != exitError || stdout.Len() != 0 || stderr.Len() == 0 {
 				t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}
-			if strings.Contains(name, "nil adapter") && !strings.Contains(stderr.String(), "collect adapter is required") {
+			if strings.Contains(name, "nil adapter") && !strings.Contains(stderr.String(), "registered collect adapter cannot be nil") {
 				t.Fatalf("nil adapter did not cause setup failure: %q", stderr.String())
 			}
-			if strings.Contains(name, "nil sensor") && !strings.Contains(stderr.String(), "collect sensor is required") {
+			if strings.Contains(name, "nil sensor") && !strings.Contains(stderr.String(), "registered collect sensor cannot be nil") {
 				t.Fatalf("nil sensor did not cause setup failure: %q", stderr.String())
 			}
 			if name == "nil signal" && !strings.Contains(stderr.String(), "declares a nil signal") {
@@ -508,6 +533,7 @@ func TestWithCollectRejectsDuplicateGPUAdapters(t *testing.T) {
 	}
 }
 
+// emptyAppSensor succeeds with no observations and records its signal selection.
 type emptyAppSensor struct {
 	cycles   *[]*collect.Cycle
 	selected *[]string
@@ -585,6 +611,7 @@ func TestWithCollectReportsMissingProducer(t *testing.T) {
 	}
 }
 
+// partialCountMeasurement has one field fed by a producer and one left missing.
 type partialCountMeasurement struct {
 	failures     []health.ErroredMeasurement
 	Count        int64 `json:"custom_count"`
@@ -734,6 +761,8 @@ var (
 	_ CollectAdapter = collectadapters.NVLink()
 )
 
+// collectHardwareSensor emits healthy canonical GPU observations for each of
+// gpuIDs, restricted to the selected signals.
 type collectHardwareSensor struct {
 	id      string
 	cycles  []*collect.Cycle
