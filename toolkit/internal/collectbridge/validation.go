@@ -163,6 +163,10 @@ func validateCollectObservation(o *observation.Observation, s collect.Signal) er
 	if canonicalGPU[s.ID()] == nil {
 		return nil
 	}
+	// Every canonical GPU signal is whole-GPU today. Before consuming a
+	// per-link or GPU-pair one, move this rule into the canonical mappings
+	// in the same change: observations.targetID attributes endpoint and pair
+	// targets to their source GPU, so dropping it alone would misattribute.
 	if o.GetTarget() != nil && o.GetTarget().GetGpu() == nil {
 		return fmt.Errorf("signal %q requires a GPU target", s.ID())
 	}

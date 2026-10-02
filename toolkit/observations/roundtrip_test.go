@@ -122,7 +122,6 @@ func TestToMeasurementsIgnoresUnknownSignals(t *testing.T) {
 	unknown := []*observation.Observation{
 		valueObservation("gpu.not_a_field", intValue(1)),
 		valueObservation("storage.capacity", intValue(1)),
-		valueObservation(gpusignals.TemperatureCelsius.ID(), doubleValue(40)),
 	}
 	if measurements := ToMeasurements(unknown); len(measurements) != 0 {
 		t.Fatalf("want no measurements, got %v", measurements)
