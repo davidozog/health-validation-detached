@@ -1,0 +1,830 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package app
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/dsx-ai-factory/health-validation/catalog"
+	"github.com/dsx-ai-factory/health-validation/catalog/cpu"
+	"github.com/dsx-ai-factory/health-validation/catalog/gpu"
+	"github.com/dsx-ai-factory/health-validation/catalog/health"
+	"github.com/dsx-ai-factory/health-validation/catalog/node"
+	"github.com/dsx-ai-factory/health-validation/catalog/nvlink"
+	"github.com/dsx-ai-factory/health-validation/collect"
+	"github.com/dsx-ai-factory/health-validation/collect/observation"
+	gpusignals "github.com/dsx-ai-factory/health-validation/collect/signals/gpu"
+	"github.com/dsx-ai-factory/health-validation/toolkit"
+	"github.com/dsx-ai-factory/health-validation/toolkit/internal/collectadapters"
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+const customCountSignal = "test.node.custom_count"
+
+func TestLegacyOnlyCollectionIsUnchangedByCollectPlumbing(t *testing.T) {
+	a := cadenceRunApp().WithNodeID(testNodeID).
+		WithNodeBackend(toolkit.MockNode(node.NodeMeasurement{GPUCount: 4}))
+	cpuCalls := 0
+	a.WithCPUBackend(cpuBackendFunc(func(context.Context) (cpu.CPUMeasurement, error) {
+		cpuCalls++
+		return cpu.CPUMeasurement{PossibleCPUCount: 4, OnlineCPUCount: 3, NUMANodeCount: 34}, nil
+	}))
+	bridged, err := a.collectSensors(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bridged) != 0 {
+		t.Fatalf("unregistered collect sensors added %d bridges", len(bridged))
+	}
+	var stdout, stderr bytes.Buffer
+	if code := a.runCommand(nil, &stdout, &stderr); code != exitUnhealthy {
+		t.Fatalf("runCommand exit=%d, want %d; stderr=%q", code, exitUnhealthy, stderr.String())
+	}
+	if cpuCalls != 1 || !*a.host.(fakeHost).b.called {
+		t.Fatalf("legacy providers were not called: cpu=%d gpu=%v", cpuCalls, *a.host.(fakeHost).b.called)
+	}
+	var verdict health.NodeVerdict
+	if err = json.Unmarshal(stdout.Bytes(), &verdict); err != nil {
+		t.Fatal(err)
+	}
+	results := make(map[string]health.CheckVerdict)
+	for _, result := range verdict.CheckResults {
+		results[result.CheckID] = result
+	}
+	if result, ok := results["cpu_count"]; !ok || result.Severity != health.Critical || result.ObservedValues[cpu.SignalOnlineCPUCount] != float64(3) {
+		t.Fatalf("legacy CPU failure did not reach the verdict: %+v", verdict)
+	}
+	if result, ok := results["gpu_count"]; !ok || result.Severity != health.Pass || result.ObservedValues[node.SignalGPUCount] != float64(4) {
+		t.Fatalf("legacy node measurement did not reach the verdict: %+v", verdict)
+	}
+	if verdict.NodeID != testNodeID {
+		t.Fatalf("node ID=%q, want %q", verdict.NodeID, testNodeID)
+	}
+}
+
+type collectAppSensor struct {
+	cycles []*collect.Cycle
+}
+
+func (*collectAppSensor) ID() string { return "test.node" }
+func (*collectAppSensor) Signals() collect.Signals {
+	return collect.Signals{collect.NewSignal(customCountSignal, "1")}
+}
+
+func (s *collectAppSensor) Measure(_ context.Context, opts ...collect.OpOption) (*observation.ObservationBatch, error) {
+	cycle := collect.NewOp(opts...).Cycle()
+	s.cycles = append(s.cycles, cycle)
+	return &observation.ObservationBatch{
+		CollectionId: cycle.CollectionID(),
+		Observations: []*observation.Observation{{
+			SignalId:   customCountSignal,
+			Source:     s.ID(),
+			Unit:       sensorUnit(),
+			Target:     observation.NodeTarget(""),
+			ObservedAt: timestamppb.Now(),
+			Outcome:    &observation.Observation_Value{Value: &observation.Value{Kind: &observation.Value_IntValue{IntValue: 4}}},
+		}},
+	}, nil
+}
+
+func sensorUnit() *string { unit := "1"; return &unit }
+
+type customCountMeasurement struct {
+	failures []health.ErroredMeasurement
+	Count    int64 `json:"custom_count"`
+}
+
+func (customCountMeasurement) Category() health.Category             { return health.Node }
+func (m customCountMeasurement) Errors() []health.ErroredMeasurement { return m.failures }
+
+type collectAppAdapter struct {
+	build   func([]*observation.Observation) []health.Measurement
+	errored func(error) []health.Measurement
+	name    string
+	signals []string
+}
+
+func (a collectAppAdapter) Name() string      { return a.name }
+func (a collectAppAdapter) Signals() []string { return a.signals }
+func (a collectAppAdapter) Build(obs []*observation.Observation) []health.Measurement {
+	return a.build(obs)
+}
+func (a collectAppAdapter) Errored(err error) []health.Measurement { return a.errored(err) }
+
+func customCountAdapter() collectAppAdapter {
+	return collectAppAdapter{
+		name:    "custom-count",
+		signals: []string{customCountSignal},
+		build: func(obs []*observation.Observation) []health.Measurement {
+			m := customCountMeasurement{}
+			for _, o := range obs {
+				if o.GetCollectionError() != nil || o.GetNoValue() != nil {
+					m.failures = append(m.failures, health.NewErroredMeasurement(fmt.Errorf("count unavailable"), "custom_count"))
+				} else {
+					m.Count = o.GetValue().GetIntValue()
+				}
+			}
+			return []health.Measurement{m}
+		},
+		errored: func(err error) []health.Measurement {
+			return []health.Measurement{customCountMeasurement{failures: []health.ErroredMeasurement{health.NewErroredMeasurement(err, "custom_count")}}}
+		},
+	}
+}
+
+func mixedChecks() []health.CheckDefinition {
+	return []health.CheckDefinition{
+		{
+			ID: "mixed_prolog", Name: "Mixed prolog", Category: health.Node,
+			RequiredSignals: []string{"custom_count"}, SchedulingCadence: health.Prolog,
+			Rules: []health.Rule{{Expression: "custom_count != 4", Severity: health.Critical}},
+		},
+		{
+			ID: "mixed_continuous", Name: "Mixed continuous", Category: health.CPU,
+			RequiredSignals: []string{"online_cpu_count"}, Dependencies: []string{"mixed_prolog"},
+			Rules: []health.Rule{{Expression: "online_cpu_count != 1", Severity: health.Critical}},
+		},
+		{
+			ID: "mixed_maintenance", Name: "Mixed maintenance", Category: health.Node,
+			RequiredSignals: []string{"custom_count"}, SchedulingCadence: health.MaintenanceWindow,
+			Rules: []health.Rule{{Expression: "custom_count != 4", Severity: health.Critical}},
+		},
+	}
+}
+
+type checkOutcome struct {
+	severity health.Severity
+	reason   health.SkipReason
+	skipped  bool
+}
+
+func mixedOutcomes(v health.NodeVerdict) map[string]checkOutcome {
+	result := make(map[string]checkOutcome)
+	for _, c := range append(v.CheckResults, v.SkippedChecks...) {
+		if c.CheckID == "mixed_continuous" || c.CheckID == "mixed_prolog" || c.CheckID == "mixed_maintenance" {
+			result[c.CheckID] = checkOutcome{severity: c.Severity, reason: c.SkipReason, skipped: c.Skipped}
+		}
+	}
+	return result
+}
+
+func TestWithCollectRetainsCadenceAndDependencyEvaluation(t *testing.T) {
+	for _, name := range []string{"", "CONTINUOUS", "PROLOG", "MAINTENANCE"} {
+		t.Run(name, func(t *testing.T) {
+			sensor := &collectAppSensor{}
+			legacyCalls := 0
+			measurement := cpu.CPUMeasurement{PossibleCPUCount: 1, OnlineCPUCount: 1, NUMANodeCount: 34}
+			a := cadenceRunApp().WithNodeID(testNodeID).WithChecks(mixedChecks()...).WithCollect(sensor).WithCollectAdapters(customCountAdapter())
+			a.WithCPUBackend(cpuBackendFunc(func(context.Context) (cpu.CPUMeasurement, error) {
+				legacyCalls++
+				return measurement, nil
+			}))
+			args := []string{"run"}
+			var cadence *health.SchedulingCadence
+			if name != "" {
+				args = append(args, "--cadence", name)
+				value, err := health.SchedulingCadenceFromName(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cadence = &value
+			}
+			var stdout, stderr bytes.Buffer
+			if code := a.Run(args, &stdout, &stderr); code == exitError {
+				t.Fatalf("Run: %s", stderr.String())
+			}
+			var actual health.NodeVerdict
+			if err := json.Unmarshal(stdout.Bytes(), &actual); err != nil {
+				t.Fatal(err)
+			}
+			cat, _, err := buildCatalog(nil, mixedChecks(), "GB200")
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected, err := cat.EvaluateAllWithOptions(catalog.EvaluationOptions{Cadence: cadence}, measurement, customCountMeasurement{Count: 4})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(mixedOutcomes(actual), mixedOutcomes(expected)) {
+				t.Fatalf("mixed outcomes = %v; want %v", mixedOutcomes(actual), mixedOutcomes(expected))
+			}
+			if legacyCalls != 1 || len(sensor.cycles) != 1 {
+				t.Fatalf("legacy calls=%d collect calls=%d", legacyCalls, len(sensor.cycles))
+			}
+		})
+	}
+}
+
+func TestWithCollectCreatesFreshCycleOnRepeatedRuns(t *testing.T) {
+	sensor := &collectAppSensor{}
+	a := cadenceRunApp().WithNodeID(testNodeID).WithCollect(sensor).WithCollectAdapters(customCountAdapter())
+	for range 2 {
+		var stdout, stderr bytes.Buffer
+		if code := a.Run([]string{"run"}, &stdout, &stderr); code == exitError {
+			t.Fatalf("Run: %s", stderr.String())
+		}
+	}
+	if len(sensor.cycles) != 2 || sensor.cycles[0] == sensor.cycles[1] || sensor.cycles[0].CollectionID() == sensor.cycles[1].CollectionID() {
+		t.Fatalf("expected two distinct cycles; got %v", sensor.cycles)
+	}
+}
+
+func TestWithCollectRegistrationOrderPreservesVerdict(t *testing.T) {
+	for _, cadence := range []string{"", "CONTINUOUS", "PROLOG", "MAINTENANCE"} {
+		t.Run(cadence, func(t *testing.T) {
+			var expected *health.NodeVerdict
+			for _, adaptersFirst := range []bool{false, true} {
+				source := &collectAppSensor{}
+				a := cadenceRunApp().WithNodeID(testNodeID).WithChecks(mixedChecks()...)
+				if adaptersFirst {
+					a.WithCollectAdapters(customCountAdapter()).WithCollect(source)
+				} else {
+					a.WithCollect(source).WithCollectAdapters(customCountAdapter())
+				}
+				args := []string{"run"}
+				if cadence != "" {
+					args = append(args, "--cadence", cadence)
+				}
+				var stdout, stderr bytes.Buffer
+				if code := a.Run(args, &stdout, &stderr); code == exitError {
+					t.Fatalf("Run: %s", stderr.String())
+				}
+				var verdict health.NodeVerdict
+				if err := json.Unmarshal(stdout.Bytes(), &verdict); err != nil {
+					t.Fatal(err)
+				}
+				if len(source.cycles) != 1 {
+					t.Fatalf("source calls=%d, want 1", len(source.cycles))
+				}
+				// Each run intentionally has different timestamps and trace IDs.
+				verdict.Timestamp, verdict.TraceID = time.Time{}, ""
+				for _, results := range [][]health.CheckVerdict{verdict.CheckResults, verdict.SkippedChecks} {
+					for i := range results {
+						results[i].Timestamp = time.Time{}
+						results[i].TraceID, results[i].SpanID = "", ""
+					}
+				}
+				slices.SortFunc(verdict.AffectedComponents, func(a, b health.AffectedComponent) int {
+					return strings.Compare(a.Category.String(), b.Category.String())
+				})
+				if expected == nil {
+					expected = &verdict
+				} else if !reflect.DeepEqual(verdict, *expected) {
+					t.Fatalf("registration order changed verdict:\n got=%+v\nwant=%+v", verdict, *expected)
+				}
+			}
+		})
+	}
+}
+
+type countedCollectAdapter struct {
+	CollectAdapter
+	nameCalls   int
+	signalCalls int
+}
+
+func (a *countedCollectAdapter) Name() string {
+	a.nameCalls++
+	return a.CollectAdapter.Name()
+}
+
+func (a *countedCollectAdapter) Signals() []string {
+	a.signalCalls++
+	return a.CollectAdapter.Signals()
+}
+
+func TestWithCollectCapturesAdapterMetadataOncePerRun(t *testing.T) {
+	source := &collectAppSensor{}
+	adapter := customCountAdapter()
+	counted := &countedCollectAdapter{CollectAdapter: &adapter}
+	a := New().WithCollect(source).WithCollectAdapters(counted)
+	bridged, err := a.collectSensors(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counted.nameCalls != 1 || counted.signalCalls != 1 {
+		t.Fatalf("metadata calls: name=%d signals=%d", counted.nameCalls, counted.signalCalls)
+	}
+	adapter.name = "changed"
+	adapter.signals[0] = "changed"
+	if bridged[0].Name() != "custom-count" {
+		t.Fatalf("adapter name changed after validation: %q", bridged[0].Name())
+	}
+	measurements, err := bridged[0].Measure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(measurements) != 1 {
+		t.Fatalf("measurements=%v", measurements)
+	}
+	m := measurements[0].(customCountMeasurement)
+	if m.Count != 4 || len(m.Errors()) != 0 || len(source.cycles) != 1 {
+		t.Fatalf("validated signal selection changed: measurement=%+v calls=%d", m, len(source.cycles))
+	}
+	adapter.name = "custom-count"
+	adapter.signals[0] = customCountSignal
+	if _, err = a.collectSensors(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if counted.nameCalls != 2 || counted.signalCalls != 2 {
+		t.Fatalf("metadata was not refreshed for the next run: name=%d signals=%d", counted.nameCalls, counted.signalCalls)
+	}
+}
+
+type metadataCollectAdapter struct {
+	CollectAdapter
+	name    func() string
+	signals func() []string
+}
+
+func (a metadataCollectAdapter) Name() string {
+	if a.name != nil {
+		return a.name()
+	}
+	return a.CollectAdapter.Name()
+}
+
+func (a metadataCollectAdapter) Signals() []string {
+	if a.signals != nil {
+		return a.signals()
+	}
+	return a.CollectAdapter.Signals()
+}
+
+type metadataCollectSensor struct {
+	collect.Sensor
+	id      func() string
+	signals func() collect.Signals
+}
+
+func (s metadataCollectSensor) ID() string {
+	if s.id != nil {
+		return s.id()
+	}
+	return s.Sensor.ID()
+}
+
+func (s metadataCollectSensor) Signals() collect.Signals {
+	if s.signals != nil {
+		return s.signals()
+	}
+	return s.Sensor.Signals()
+}
+
+func TestWithCollectReportsRegistrationPanics(t *testing.T) {
+	for _, method := range []string{"adapter Name", "adapter Signals", "sensor ID", "sensor Signals"} {
+		t.Run(method, func(t *testing.T) {
+			source := &collectAppSensor{}
+			sensor := metadataCollectSensor{Sensor: source}
+			adapter := metadataCollectAdapter{CollectAdapter: customCountAdapter()}
+			switch method {
+			case "adapter Name":
+				adapter.name = func() string { panic(method) }
+			case "adapter Signals":
+				adapter.signals = func() []string { panic(method) }
+			case "sensor ID":
+				sensor.id = func() string { panic(method) }
+			case "sensor Signals":
+				sensor.signals = func() collect.Signals { panic(method) }
+			}
+			a := cadenceRunApp().WithNodeID(testNodeID).WithCollect(sensor).WithCollectAdapters(adapter)
+			var stdout, stderr bytes.Buffer
+			if code := a.Run([]string{"run"}, &stdout, &stderr); code != exitError || stdout.Len() != 0 {
+				t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "register collect sensors: collect registration panicked: "+method) {
+				t.Fatalf("registration panic was not reported: %q", stderr.String())
+			}
+			if len(source.cycles) != 0 || *a.host.(fakeHost).b.called {
+				t.Fatal("registration panic allowed measurement")
+			}
+		})
+	}
+}
+
+func TestWithCollectRejectsInvalidRegistrationsBeforeMeasuring(t *testing.T) {
+	for _, name := range []string{"nil sensor", "typed nil sensor", "nil signal", "no adapter", "nil adapter", "typed nil adapter", "incomplete adapter", "unowned signal", "duplicate producer", "duplicate adapter", "duplicate adapter across calls"} {
+		t.Run(name, func(t *testing.T) {
+			sensor := &collectAppSensor{}
+			var otherCycles []*collect.Cycle
+			var selected []string
+			a := cadenceRunApp().WithNodeID(testNodeID)
+			switch name {
+			case "nil sensor":
+				a.WithCollect(nil).WithCollectAdapters(customCountAdapter())
+			case "typed nil sensor":
+				var source *collectAppSensor
+				a.WithCollect(source).WithCollectAdapters(customCountAdapter())
+			case "nil signal":
+				a.WithCollect(metadataCollectSensor{Sensor: sensor, signals: func() collect.Signals {
+					return collect.Signals{collect.NewSignal(customCountSignal, "1"), nil}
+				}}).WithCollectAdapters(customCountAdapter())
+			case "no adapter":
+				a.WithCollect(sensor)
+			case "nil adapter":
+				a.WithCollect(sensor).WithCollectAdapters(nil)
+			case "typed nil adapter":
+				var adapter *collectAppAdapter
+				a.WithCollect(sensor).WithCollectAdapters(adapter)
+			case "incomplete adapter":
+				a.WithCollect(sensor).WithCollectAdapters(collectAppAdapter{})
+			case "unowned signal":
+				adapter := customCountAdapter()
+				adapter.signals = []string{"unknown"}
+				a.WithCollect(sensor).WithCollectAdapters(adapter)
+			case "duplicate producer":
+				a.WithCollect(sensor).WithCollectAdapters(customCountAdapter()).WithCollect(metadataCollectSensor{
+					Sensor: &collectAppSensor{}, id: func() string { return "test.node.other" },
+				})
+			case "duplicate adapter":
+				a.WithCollect(sensor).WithCollectAdapters(customCountAdapter(), customCountAdapter())
+			case "duplicate adapter across calls":
+				adapter := customCountAdapter()
+				adapter.signals = append(adapter.signals, "test.empty")
+				a.WithCollect(sensor).WithCollectAdapters(adapter).WithCollect(&emptyAppSensor{cycles: &otherCycles, selected: &selected}).WithCollectAdapters(adapter)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := a.Run([]string{"run"}, &stdout, &stderr); code != exitError || stdout.Len() != 0 || stderr.Len() == 0 {
+				t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if strings.Contains(name, "nil adapter") && !strings.Contains(stderr.String(), "collect adapter is required") {
+				t.Fatalf("nil adapter did not cause setup failure: %q", stderr.String())
+			}
+			if strings.Contains(name, "nil sensor") && !strings.Contains(stderr.String(), "collect sensor is required") {
+				t.Fatalf("nil sensor did not cause setup failure: %q", stderr.String())
+			}
+			if name == "nil signal" && !strings.Contains(stderr.String(), "declares a nil signal") {
+				t.Fatalf("nil signal did not cause setup failure: %q", stderr.String())
+			}
+			if name == "no adapter" && !strings.Contains(stderr.String(), "collect sensors registered without adapters; register adapters with WithCollectAdapters") {
+				t.Fatalf("missing adapters were not explained: %q", stderr.String())
+			}
+			if name == "unowned signal" && !strings.Contains(stderr.String(), "supplies no adapter-requested signals") {
+				t.Fatalf("sensor without requested signals did not cause setup failure: %q", stderr.String())
+			}
+			if name == "duplicate producer" && !strings.Contains(stderr.String(), "select one source explicitly") {
+				t.Fatalf("overlapping producers were not rejected: %q", stderr.String())
+			}
+			if strings.HasPrefix(name, "duplicate adapter") && !strings.Contains(stderr.String(), `collect adapter "custom-count" is already registered`) {
+				t.Fatalf("duplicate adapter did not cause setup failure: %q", stderr.String())
+			}
+			if len(sensor.cycles) != 0 || len(otherCycles) != 0 {
+				t.Fatal("invalid registration was measured")
+			}
+		})
+	}
+}
+
+func TestWithCollectRejectsDuplicateGPUAdapters(t *testing.T) {
+	for _, registration := range []string{"one call", "two calls"} {
+		t.Run(registration, func(t *testing.T) {
+			first, second := &collectHardwareSensor{}, &collectHardwareSensor{}
+			a := cadenceRunApp().WithNodeID(testNodeID)
+			if registration == "one call" {
+				a.WithCollect(first).WithCollectAdapters(collectadapters.GPU(), collectadapters.GPU())
+			} else {
+				a.WithCollect(first).WithCollectAdapters(collectadapters.GPU()).WithCollect(second).WithCollectAdapters(collectadapters.GPU())
+			}
+			var stdout, stderr bytes.Buffer
+			if code := a.Run([]string{"run"}, &stdout, &stderr); code != exitError || stdout.Len() != 0 {
+				t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), `collect adapter "gpu" is already registered`) {
+				t.Fatalf("duplicate GPU adapter was not rejected: %q", stderr.String())
+			}
+			if first.calls != 0 || second.calls != 0 || *a.host.(fakeHost).b.called {
+				t.Fatal("duplicate GPU adapter allowed measurement")
+			}
+		})
+	}
+}
+
+type emptyAppSensor struct {
+	cycles   *[]*collect.Cycle
+	selected *[]string
+}
+
+func (*emptyAppSensor) ID() string { return "test.empty" }
+func (*emptyAppSensor) Signals() collect.Signals {
+	return collect.Signals{collect.NewSignal("test.empty", ""), collect.NewSignal("test.unused", "")}
+}
+
+func (s *emptyAppSensor) Measure(_ context.Context, opts ...collect.OpOption) (*observation.ObservationBatch, error) {
+	op := collect.NewOp(opts...)
+	signals, err := op.Signals(s.Signals())
+	if err != nil {
+		return nil, err
+	}
+	*s.cycles = append(*s.cycles, op.Cycle())
+	*s.selected = signals.IDs()
+	return &observation.ObservationBatch{CollectionId: op.Cycle().CollectionID()}, nil
+}
+
+func TestWithCollectJoinsProducersAndSelectsRequestedSignals(t *testing.T) {
+	sensor := &collectAppSensor{}
+	var cycles []*collect.Cycle
+	var selected []string
+	adapter := customCountAdapter()
+	adapter.signals = append(adapter.signals, "test.empty")
+	a := cadenceRunApp().WithNodeID(testNodeID).WithChecks(mixedChecks()...).
+		WithCollect(sensor).WithCollectAdapters(adapter).WithCollect(&emptyAppSensor{cycles: &cycles, selected: &selected})
+	var stdout, stderr bytes.Buffer
+	if code := a.Run([]string{"run"}, &stdout, &stderr); code == exitError {
+		t.Fatalf("Run: %s", stderr.String())
+	}
+	if len(sensor.cycles) != 1 || len(cycles) != 1 || sensor.cycles[0] != cycles[0] {
+		t.Fatal("producers did not share one cycle")
+	}
+	if !reflect.DeepEqual(selected, []string{"test.empty"}) {
+		t.Fatalf("selected=%v", selected)
+	}
+	var verdict health.NodeVerdict
+	if err := json.Unmarshal(stdout.Bytes(), &verdict); err != nil {
+		t.Fatal(err)
+	}
+	if mixedOutcomes(verdict)["mixed_prolog"].severity != health.Pass {
+		t.Fatalf("joined adapter failed: %s", stdout.String())
+	}
+}
+
+func TestWithCollectReportsMissingProducer(t *testing.T) {
+	sensor := &collectAppSensor{}
+	adapter := customCountAdapter()
+	adapter.signals = append(adapter.signals, "test.missing")
+	seen := make(chan observation.CollectionErrorCategory, 1)
+	build := adapter.build
+	adapter.build = func(obs []*observation.Observation) []health.Measurement {
+		for _, o := range obs {
+			if o.SignalId == "test.missing" {
+				seen <- o.GetCollectionError().Category
+			}
+		}
+		return build(obs)
+	}
+	a := cadenceRunApp().WithNodeID(testNodeID).WithCollect(sensor).WithCollectAdapters(adapter)
+	var stdout, stderr bytes.Buffer
+	if code := a.Run([]string{"run"}, &stdout, &stderr); code == exitError {
+		t.Fatalf("Run: %s", stderr.String())
+	}
+	select {
+	case category := <-seen:
+		if category != observation.CollectionErrorCategoryNotConfigured {
+			t.Fatalf("category=%v", category)
+		}
+	default:
+		t.Fatal("missing producer was silently ignored")
+	}
+}
+
+type partialCountMeasurement struct {
+	failures     []health.ErroredMeasurement
+	Count        int64 `json:"custom_count"`
+	MissingCount int64 `json:"missing_count"`
+}
+
+func (partialCountMeasurement) Category() health.Category             { return health.Node }
+func (m partialCountMeasurement) Errors() []health.ErroredMeasurement { return m.failures }
+
+func TestWithCollectMissingProducerFailsOnlyDependentChecks(t *testing.T) {
+	source := &collectAppSensor{}
+	adapter := customCountAdapter()
+	adapter.signals = append(adapter.signals, "test.missing")
+	adapter.build = func(obs []*observation.Observation) []health.Measurement {
+		m := partialCountMeasurement{}
+		for _, o := range obs {
+			if o.GetSignalId() == "test.missing" {
+				if o.GetCollectionError().GetCategory() != observation.CollectionErrorCategoryNotConfigured {
+					t.Errorf("missing producer outcome=%v", o)
+				}
+				m.failures = append(m.failures, health.NewErroredMeasurement(fmt.Errorf("missing count unavailable"), "missing_count"))
+			} else {
+				m.Count = o.GetValue().GetIntValue()
+			}
+		}
+		return []health.Measurement{m}
+	}
+	a := New().WithCollectAdapters(adapter).WithCollect(source)
+	sensors, err := a.collectSensors(time.Second)
+	if err != nil {
+		t.Fatalf("missing producer became a registration error: %v", err)
+	}
+	cat := catalog.NewEmpty(catalog.WithArchitecture("GB200"), catalog.WithExecutionContext(health.OperatorInfra))
+	checks := []health.CheckDefinition{
+		{
+			ID: "available_count", Name: "Available count", Category: health.Node, RequiredSignals: []string{"custom_count"},
+			Rules: []health.Rule{{Expression: "custom_count != 4", Severity: health.Critical}},
+		},
+		{
+			ID: "missing_count", Name: "Missing count", Category: health.Node, RequiredSignals: []string{"missing_count"},
+			Rules: []health.Rule{{Expression: "missing_count != 0", Severity: health.Critical}},
+		},
+		cpu.CPUCount(),
+	}
+	for _, check := range checks {
+		if err = cat.Register(check); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sensors = append(sensors, toolkit.NewCPUSensor(toolkit.MockCPU(cpu.CPUMeasurement{PossibleCPUCount: 1, OnlineCPUCount: 1})))
+	verdict, err := toolkit.Collect(cat, sensors...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(verdict.CheckResults) != 3 || len(verdict.SkippedChecks) != 0 || len(source.cycles) != 1 {
+		t.Fatalf("unexpected coverage or calls: verdict=%+v calls=%d", verdict, len(source.cycles))
+	}
+	for _, check := range verdict.CheckResults {
+		want := health.Pass
+		if check.CheckID == "missing_count" {
+			want = health.Critical
+		}
+		if check.Severity != want {
+			t.Fatalf("check %s severity=%v, want %v", check.CheckID, check.Severity, want)
+		}
+		if check.CheckID == "missing_count" && !strings.Contains(strings.Join(check.Messages, " "), "missing count unavailable") {
+			t.Fatalf("missing input did not cause the failure: %+v", check)
+		}
+	}
+}
+
+func TestWithCollectAdaptersWithoutSensorsReportMissingInputs(t *testing.T) {
+	a := cadenceRunApp().WithNodeID(testNodeID).WithChecks(mixedChecks()...).WithCollectAdapters(customCountAdapter())
+	var stdout, stderr bytes.Buffer
+	if code := a.Run([]string{"run"}, &stdout, &stderr); code != exitUnhealthy {
+		t.Fatalf("exit=%d, want %d; stderr=%q", code, exitUnhealthy, stderr.String())
+	}
+	var verdict health.NodeVerdict
+	if err := json.Unmarshal(stdout.Bytes(), &verdict); err != nil {
+		t.Fatal(err)
+	}
+	if outcome, ok := mixedOutcomes(verdict)["mixed_prolog"]; !ok || outcome.skipped || outcome.severity != health.Critical {
+		t.Fatalf("adapter without sources did not report missing inputs: %+v", verdict)
+	}
+}
+
+func TestWithCollectCombinesGPUObservationsFromTwoSensors(t *testing.T) {
+	ids := []string{"GPU-1", "GPU-2"}
+	power := &collectHardwareSensor{id: "test.power", gpuIDs: ids, signals: collect.Signals{
+		gpusignals.PowerDraw, gpusignals.PowerLimitRequested, gpusignals.PowerLimitEnforced,
+	}}
+	state := &collectHardwareSensor{id: "test.state", gpuIDs: ids, signals: collect.Signals{
+		gpusignals.PerformanceState, gpusignals.HardwareSlowdownActive,
+		gpusignals.HardwareThermalSlowdownActive, gpusignals.HardwarePowerBrakeSlowdownActive,
+	}}
+	a := New().WithCollect(power).WithCollectAdapters(collectadapters.GPU()).WithCollect(state)
+	sensors, err := a.collectSensors(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sensors) != 1 {
+		t.Fatalf("bridged sensors=%d, want 1", len(sensors))
+	}
+	measurements, err := sensors[0].Measure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(measurements) != len(ids) {
+		t.Fatalf("measurements=%v, want one per GPU", measurements)
+	}
+	seen := make(map[string]bool)
+	for _, measurement := range measurements {
+		m := measurement.(gpu.GPUMeasurement)
+		if seen[m.GPUID] || !slices.Contains(ids, m.GPUID) {
+			t.Fatalf("unexpected or duplicate GPU measurement: %+v", m)
+		}
+		seen[m.GPUID] = true
+		if m.PowerLimitW != 700 || m.EnforcedPowerLimitW != 700 || m.GPUPstate != 0 || m.HWSlowdown || m.HWThermalSlowdown || m.HWPowerBrakeSlowdown {
+			t.Fatalf("GPU observations were not combined: %+v", m)
+		}
+	}
+	cat := catalog.NewEmpty(catalog.WithArchitecture("H100"), catalog.WithExecutionContext(health.OperatorInfra))
+	for _, check := range []health.CheckDefinition{gpu.GPUPowerLimit(), gpu.GPUPowerState(), gpu.GPUSensorThrottle()} {
+		if err = cat.Register(check); err != nil {
+			t.Fatal(err)
+		}
+	}
+	verdict, err := toolkit.Collect(cat, sensors...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if power.calls != 1 || state.calls != 1 || len(power.cycles) != 1 || len(state.cycles) != 1 || power.cycles[0] != state.cycles[0] {
+		t.Fatalf("sources were not collected once on a shared cycle: power=%+v state=%+v", power, state)
+	}
+	if len(verdict.CheckResults) != 6 || len(verdict.SkippedChecks) != 0 {
+		t.Fatalf("combined measurements lost checks: %+v", verdict)
+	}
+	for _, check := range verdict.CheckResults {
+		if check.Severity != health.Pass {
+			t.Fatalf("combined measurement check %s failed: %+v", check.CheckID, check)
+		}
+	}
+}
+
+var (
+	_ CollectAdapter = collectadapters.GPU()
+	_ CollectAdapter = collectadapters.NVLink()
+)
+
+type collectHardwareSensor struct {
+	id      string
+	cycles  []*collect.Cycle
+	signals collect.Signals
+	gpuIDs  []string
+	calls   int
+}
+
+func (s *collectHardwareSensor) ID() string {
+	if s.id != "" {
+		return s.id
+	}
+	return "test.hardware"
+}
+
+func (s *collectHardwareSensor) Signals() collect.Signals {
+	if s.signals != nil {
+		return s.signals
+	}
+	return gpusignals.All()
+}
+
+func (s *collectHardwareSensor) Measure(_ context.Context, opts ...collect.OpOption) (*observation.ObservationBatch, error) {
+	s.calls++
+	op := collect.NewOp(opts...)
+	s.cycles = append(s.cycles, op.Cycle())
+	selected, err := op.Signals(s.Signals())
+	if err != nil {
+		return nil, err
+	}
+	batch := &observation.ObservationBatch{CollectionId: op.Cycle().CollectionID()}
+	gpuIDs := s.gpuIDs
+	if len(gpuIDs) == 0 {
+		gpuIDs = []string{"GPU-1"}
+	}
+	for _, gpuID := range gpuIDs {
+		for _, signal := range selected {
+			value := &observation.Value{Kind: &observation.Value_BoolValue{BoolValue: false}}
+			switch signal.ID() {
+			case gpusignals.PowerDraw.ID(), gpusignals.PowerLimitRequested.ID(), gpusignals.PowerLimitEnforced.ID():
+				value.Kind = &observation.Value_DoubleValue{DoubleValue: 700}
+			case gpusignals.PerformanceState.ID():
+				value.Kind = &observation.Value_IntValue{IntValue: 0}
+			case gpusignals.FabricManagerStatus.ID():
+				value.Kind = &observation.Value_IntValue{IntValue: gpusignals.FabricManagerStatusSuccess}
+			}
+			batch.Observations = append(batch.Observations, &observation.Observation{
+				SignalId: signal.ID(), Source: s.ID(), Target: observation.GPUTarget(gpuID),
+				ObservedAt: timestamppb.Now(), Unit: signal.Unit(),
+				Outcome: &observation.Observation_Value{Value: value},
+			})
+		}
+	}
+	return batch, nil
+}
+
+func TestWithCollectRegistersReusableDomainAdapters(t *testing.T) {
+	for _, separateCalls := range []bool{false, true} {
+		t.Run(fmt.Sprintf("separate adapter calls=%v", separateCalls), func(t *testing.T) {
+			source := &collectHardwareSensor{}
+			a := New().WithCollect(source)
+			if separateCalls {
+				a.WithCollectAdapters(collectadapters.GPU()).WithCollectAdapters(collectadapters.NVLink())
+			} else {
+				a.WithCollectAdapters(collectadapters.GPU(), collectadapters.NVLink())
+			}
+			sensors, err := a.collectSensors(time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(sensors) != 2 {
+				t.Fatalf("bridged sensors=%d, want 2", len(sensors))
+			}
+			cat := catalog.NewEmpty(catalog.WithArchitecture("GB200"), catalog.WithExecutionContext(health.OperatorInfra))
+			for _, check := range []health.CheckDefinition{gpu.GPUPowerState(), nvlink.NVLinkFabric()} {
+				if err = cat.Register(check); err != nil {
+					t.Fatal(err)
+				}
+			}
+			verdict, err := toolkit.Collect(cat, sensors...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if source.calls != 1 || len(verdict.CheckResults) != 2 {
+				t.Fatalf("calls=%d, verdict=%+v", source.calls, verdict)
+			}
+			for _, check := range verdict.CheckResults {
+				if check.Severity != health.Pass {
+					t.Fatalf("check %s=%+v", check.CheckID, check)
+				}
+			}
+		})
+	}
+}

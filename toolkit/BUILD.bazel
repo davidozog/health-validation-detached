@@ -39,6 +39,7 @@ go_library(
         "//catalog/node",
         "//catalog/nvlink",
         "//catalog/xid",
+        "//toolkit/internal/collectbridge",
         "//toolkit/xid",
     ],
 )

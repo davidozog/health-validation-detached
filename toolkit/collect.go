@@ -10,6 +10,7 @@ import (
 
 	"github.com/dsx-ai-factory/health-validation/catalog"
 	"github.com/dsx-ai-factory/health-validation/catalog/health"
+	"github.com/dsx-ai-factory/health-validation/toolkit/internal/collectbridge"
 )
 
 // DefaultSensorTimeout bounds each sensor's collection when [Collect] is
@@ -164,6 +165,11 @@ type sensorResult struct {
 // backend cannot crash the whole run; a cgo segfault is not a Go panic and
 // cannot be caught here.
 func collectSensor(s Sensor, timeout time.Duration) sensorResult {
+	// Collect-backed sources have independent cycle budgets. Preparation fills
+	// their shared cache before this watchdog bounds adapter conversion.
+	if prepared, ok := s.(*collectbridge.Sensor); ok {
+		prepared.Prepare(timeout)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 

@@ -6,6 +6,7 @@ require (
 	github.com/NVIDIA/go-nvml v0.13.4-0
 	github.com/dsx-ai-factory/health-validation/catalog v0.3.0
 	github.com/dsx-ai-factory/health-validation/collect v0.3.0
+	github.com/google/uuid v1.6.0
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.46.0
 	go.opentelemetry.io/otel/metric v1.46.0
@@ -24,7 +25,6 @@ require (
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/cel-go v0.28.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect

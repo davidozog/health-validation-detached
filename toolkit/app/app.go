@@ -42,6 +42,7 @@ import (
 
 	"github.com/dsx-ai-factory/health-validation/catalog"
 	"github.com/dsx-ai-factory/health-validation/catalog/health"
+	"github.com/dsx-ai-factory/health-validation/collect"
 	"github.com/dsx-ai-factory/health-validation/toolkit"
 	"github.com/dsx-ai-factory/health-validation/toolkit/internal/version"
 	"github.com/dsx-ai-factory/health-validation/toolkit/otelmetrics"
@@ -106,9 +107,11 @@ type App struct {
 	ib           toolkit.IBBackend
 	// prog is the program name used in usage and error-message prefixes. It
 	// defaults to filepath.Base(os.Args[0]); see WithProgramName.
-	prog         string
-	nodeID       string
-	customChecks []health.CheckDefinition
+	prog            string
+	nodeID          string
+	customChecks    []health.CheckDefinition
+	collectSources  []collect.Sensor
+	collectAdapters []CollectAdapter
 	// stderrLogging, set via WithStderrLogging, asks Run to install a
 	// stderr-backed slog default honoring --verbose.
 	stderrLogging bool
@@ -417,6 +420,12 @@ func (a *App) runCommand(args []string, stdout, stderr io.Writer) int {
 	if a.ib != nil {
 		sensors = append(sensors, toolkit.NewIBSensor(a.ib))
 	}
+	collectSensors, err := a.collectSensors(timeout)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: register collect sensors: %v\n", a.prog, err)
+		return exitError
+	}
+	sensors = append(sensors, collectSensors...)
 	verdict, produced, code := evaluate(cat, toolkit.CollectionOptions{
 		Cadence: cadence,
 		Timeout: timeout,

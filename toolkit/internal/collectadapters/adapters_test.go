@@ -1,0 +1,205 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package collectadapters
+
+import (
+	"reflect"
+	"slices"
+	"testing"
+
+	"github.com/dsx-ai-factory/health-validation/catalog/gpu"
+	"github.com/dsx-ai-factory/health-validation/catalog/health"
+	"github.com/dsx-ai-factory/health-validation/collect/observation"
+	gpusignals "github.com/dsx-ai-factory/health-validation/collect/signals/gpu"
+	"github.com/dsx-ai-factory/health-validation/toolkit/observations"
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+func TestDomainAdaptersPreserveExistingMappings(t *testing.T) {
+	obs := append(healthyGPUObservations(), healthyNVLinkObservations()...)
+	for _, a := range []*domainAdapter{GPU(), NVLink()} {
+		t.Run(a.Name(), func(t *testing.T) {
+			category := health.GPU
+			if a.Name() == "nvlink" {
+				category = health.NVLink
+			}
+			var expected []health.Measurement
+			for _, m := range observations.ToMeasurements(obs) {
+				if m.Category() == category {
+					expected = append(expected, m)
+				}
+			}
+			got := a.Build(obs)
+			if !reflect.DeepEqual(got, expected) {
+				t.Fatalf("wrapper changed mappings:\n got=%+v\n want=%+v", got, expected)
+			}
+			empty := a.Build(nil)
+			if len(empty) != 1 || empty[0].Category() != category || len(empty[0].Errors()) == 0 {
+				t.Fatalf("empty input omitted domain failure: %v", empty)
+			}
+		})
+	}
+}
+
+func TestDomainAdaptersNamespaceFailedSourceLocalSlots(t *testing.T) {
+	first := failedObservation(gpusignals.PerformanceState.ID(), &observation.CollectionError{Category: observation.CollectionErrorCategoryUnavailable})
+	first.Source = "a:b"
+	first.Target = observation.GPUSourceLocalTarget("c")
+	second := failedObservation(gpusignals.PerformanceState.ID(), &observation.CollectionError{Category: observation.CollectionErrorCategoryUnavailable})
+	second.Source = "a"
+	second.Target = observation.GPUSourceLocalTarget("b:c")
+	got := GPU().Build([]*observation.Observation{first, second})
+	if len(got) != 2 {
+		t.Fatalf("source/slot identities collapsed: %v", got)
+	}
+	ids := map[string]bool{}
+	for _, m := range got {
+		if m.Category() != health.GPU {
+			t.Fatal("foreign domain emitted")
+		}
+		if len(m.Errors()) == 0 {
+			t.Fatal("failed slot became healthy")
+		}
+	}
+	// Two different tuple components must remain distinct in display identity.
+	for _, m := range got {
+		field := m.(gpu.GPUMeasurement).GPUID
+		if ids[field] {
+			t.Fatalf("display identity collision: %q", field)
+		}
+		ids[field] = true
+	}
+}
+
+func TestGPUAdapterPreservesAbsenceInterpretation(t *testing.T) {
+	baseline := only[gpu.GPUMeasurement](t, GPU().Build(healthyGPUObservations()))
+	neutral := replace(healthyGPUObservations(), gpusignals.HardwareSlowdownActive.ID(), noValueObservation(gpusignals.HardwareSlowdownActive.ID(), observation.NoValueReasonNotSupported))
+	if m := only[gpu.GPUMeasurement](t, GPU().Build(neutral)); len(m.Errors()) != len(baseline.Errors()) {
+		t.Fatalf("unsupported neutral fact became failed: %v", m.Errors())
+	}
+	noTargets := noValueObservation(gpusignals.PerformanceState.ID(), observation.NoValueReasonNoTargets)
+	noTargets.Target = nil
+	tests := []struct {
+		name         string
+		failedSignal string
+		obs          []*observation.Observation
+	}{
+		{name: "missing", failedSignal: gpu.SignalAveragePowerDrawW, obs: healthyGPUObservations()[1:]},
+		{name: "collection error", failedSignal: gpu.SignalGPUPstate, obs: replace(healthyGPUObservations(), gpusignals.PerformanceState.ID(), failedObservation(gpusignals.PerformanceState.ID(), &observation.CollectionError{Category: observation.CollectionErrorCategoryUnavailable}))},
+		{name: "no targets", failedSignal: gpu.SignalGPUPstate, obs: replace(healthyGPUObservations(), gpusignals.PerformanceState.ID(), noTargets)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GPU().Build(tt.obs)
+			if len(got) == 0 {
+				t.Fatal("absence omitted the domain")
+			}
+			for _, m := range got {
+				var failed bool
+				for _, failure := range m.Errors() {
+					failed = failed || slices.Contains(failure.FailedSignals(), tt.failedSignal)
+				}
+				if !failed {
+					t.Fatalf("absence did not fail %q: %+v", tt.failedSignal, m)
+				}
+			}
+		})
+	}
+}
+
+func healthyGPUObservations() []*observation.Observation {
+	return []*observation.Observation{
+		valueObservation(gpusignals.PowerDraw.ID(), doubleValue(75)),
+		valueObservation(gpusignals.PowerLimitRequested.ID(), doubleValue(700)),
+		valueObservation(gpusignals.PowerLimitEnforced.ID(), doubleValue(700)),
+		valueObservation(gpusignals.PerformanceState.ID(), intValue(0)),
+		valueObservation(gpusignals.HardwareSlowdownActive.ID(), boolValue(false)),
+		valueObservation(gpusignals.HardwareThermalSlowdownActive.ID(), boolValue(true)),
+		valueObservation(gpusignals.HardwarePowerBrakeSlowdownActive.ID(), boolValue(false)),
+	}
+}
+
+func healthyNVLinkObservations() []*observation.Observation {
+	return []*observation.Observation{
+		valueObservation(gpusignals.NVLinkFabricBandwidthDegraded.ID(), boolValue(false)),
+		valueObservation(gpusignals.NVLinkFabricRouteRecoveryActive.ID(), boolValue(false)),
+		valueObservation(gpusignals.NVLinkFabricRouteUnhealthy.ID(), boolValue(false)),
+		valueObservation(gpusignals.NVLinkFabricAccessTimeoutRecovery.ID(), boolValue(false)),
+		valueObservation(gpusignals.FabricManagerStatus.ID(), intValue(gpusignals.FabricManagerStatusSuccess)),
+	}
+}
+
+func replace(observations []*observation.Observation, signalID string, with *observation.Observation) []*observation.Observation {
+	for i, o := range observations {
+		if o.GetSignalId() == signalID {
+			observations[i] = with
+		}
+	}
+	return observations
+}
+
+func valueObservation(signalID string, value *observation.Value) *observation.Observation {
+	o := failedObservation(signalID, nil)
+	o.Outcome = &observation.Observation_Value{Value: value}
+	return o
+}
+
+func failedObservation(signalID string, failure *observation.CollectionError) *observation.Observation {
+	var unit *string
+	for _, s := range gpusignals.All() {
+		if s.ID() == signalID {
+			unit = s.Unit()
+		}
+	}
+	return &observation.Observation{
+		SignalId:   signalID,
+		Source:     "dcgm",
+		Target:     observation.GPUTarget("GPU-0"),
+		ObservedAt: timestamppb.Now(),
+		Unit:       unit,
+		Outcome:    &observation.Observation_CollectionError{CollectionError: failure},
+	}
+}
+
+func noValueObservation(signalID string, reason observation.NoValueReason) *observation.Observation {
+	o := failedObservation(signalID, nil)
+	o.Outcome = &observation.Observation_NoValue{NoValue: &observation.NoValue{Reason: reason}}
+	return o
+}
+
+func only[M health.Measurement](t *testing.T, measurements []health.Measurement) M {
+	t.Helper()
+	var found []M
+	for _, m := range measurements {
+		if typed, ok := m.(M); ok {
+			found = append(found, typed)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("want one %T, got %d", *new(M), len(found))
+	}
+	return found[0]
+}
+
+func intValue(v int64) *observation.Value {
+	return &observation.Value{Kind: &observation.Value_IntValue{IntValue: v}}
+}
+
+func doubleValue(v float64) *observation.Value {
+	return &observation.Value{Kind: &observation.Value_DoubleValue{DoubleValue: v}}
+}
+
+func boolValue(v bool) *observation.Value {
+	return &observation.Value{Kind: &observation.Value_BoolValue{BoolValue: v}}
+}
+
+func TestAdapterRequestsMatchConverterMappings(t *testing.T) {
+	got := append(GPU().Signals(), NVLink().Signals()...)
+	want := observations.CanonicalSignals()
+	slices.Sort(got)
+	slices.Sort(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("adapter signals=%v, converter signals=%v", got, want)
+	}
+}

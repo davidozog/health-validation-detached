@@ -6,6 +6,7 @@ go_library(
         "app.go",
         "backend_linux.go",
         "backend_other.go",
+        "collect.go",
         "config.go",
         "version.go",
     ],
@@ -14,9 +15,13 @@ go_library(
     deps = [
         "//catalog",
         "//catalog/health",
+        "//collect",
+        "//collect/observation",
         "//toolkit",
+        "//toolkit/internal/collectbridge",
         "//toolkit/internal/version",
         "//toolkit/otelmetrics",
+        "@com_github_google_uuid//:uuid",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ] + select({
         "@rules_go//go/platform:linux": [
@@ -30,6 +35,7 @@ go_test(
     name = "app_test",
     srcs = [
         "app_test.go",
+        "collect_test.go",
         "config_test.go",
         "version_test.go",
     ],
@@ -42,6 +48,11 @@ go_test(
         "//catalog/health",
         "//catalog/node",
         "//catalog/nvlink",
+        "//collect",
+        "//collect/observation",
+        "//collect/signals/gpu",
         "//toolkit",
+        "//toolkit/internal/collectadapters",
+        "@org_golang_google_protobuf//types/known/timestamppb",
     ],
 )
