@@ -38,7 +38,7 @@ func TestLegacyOnlyCollectionIsUnchangedByCollectPlumbing(t *testing.T) {
 		cpuCalls++
 		return cpu.CPUMeasurement{PossibleCPUCount: 4, OnlineCPUCount: 3, NUMANodeCount: 34}, nil
 	}))
-	bridged, err := a.collectSensors(time.Second)
+	bridged, err := a.collectSensors(time.Second, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestWithCollectCapturesAdapterMetadataOncePerRun(t *testing.T) {
 	adapter := customCountAdapter()
 	counted := &countedCollectAdapter{CollectAdapter: &adapter}
 	a := New().WithCollect(source).WithCollectAdapters(counted)
-	bridged, err := a.collectSensors(time.Second)
+	bridged, err := a.collectSensors(time.Second, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestWithCollectCapturesAdapterMetadataOncePerRun(t *testing.T) {
 	}
 	adapter.name = "custom-count"
 	adapter.signals[0] = customCountSignal
-	if _, err = a.collectSensors(time.Second); err != nil {
+	if _, err = a.collectSensors(time.Second, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if counted.nameCalls != 2 || counted.signalCalls != 2 {
@@ -640,7 +640,7 @@ func TestWithCollectMissingProducerFailsOnlyDependentChecks(t *testing.T) {
 		return []health.Measurement{m}
 	}
 	a := New().WithCollectAdapters(adapter).WithCollect(source)
-	sensors, err := a.collectSensors(time.Second)
+	sensors, err := a.collectSensors(time.Second, nil, nil)
 	if err != nil {
 		t.Fatalf("missing producer became a registration error: %v", err)
 	}
@@ -708,7 +708,7 @@ func TestWithCollectCombinesGPUObservationsFromTwoSensors(t *testing.T) {
 		gpusignals.HardwareThermalSlowdownActive, gpusignals.HardwarePowerBrakeSlowdownActive,
 	}}
 	a := New().WithCollect(power).WithCollectAdapters(collectadapters.GPU()).WithCollect(state)
-	sensors, err := a.collectSensors(time.Second)
+	sensors, err := a.collectSensors(time.Second, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -832,7 +832,7 @@ func TestWithCollectWrongScalarFailsOnlyDependentChecks(t *testing.T) {
 		gpusignals.PowerLimitRequested.ID(): gb200Limit,
 		gpusignals.PowerLimitEnforced.ID():  gb200Limit,
 	}}
-	sensors, err := New().WithCollect(source).WithCollectAdapters(collectadapters.GPU(), collectadapters.NVLink()).collectSensors(time.Second)
+	sensors, err := New().WithCollect(source).WithCollectAdapters(collectadapters.GPU(), collectadapters.NVLink()).collectSensors(time.Second, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -903,7 +903,7 @@ func TestWithCollectRegistersReusableDomainAdapters(t *testing.T) {
 			} else {
 				a.WithCollectAdapters(collectadapters.GPU(), collectadapters.NVLink())
 			}
-			sensors, err := a.collectSensors(time.Second)
+			sensors, err := a.collectSensors(time.Second, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

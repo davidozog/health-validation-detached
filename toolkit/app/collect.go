@@ -37,9 +37,10 @@ type CollectAdapter interface {
 // Timeout blocking is keyed by sensor ID, not the underlying source. Shared
 // NVML/DCGM sources must prevent new calls while a timed-out call is running.
 // Late results never replace a cached timeout result.
-// Legacy sensors remain registered. Do not feed the same domain through both
-// paths; override its legacy backend with an empty provider when an adapter
-// supplies that domain's measurements instead.
+// Each built-in domain is collected by its legacy sensor or by its built-in
+// collect sensor, never both. For a domain still on a legacy sensor, override
+// its legacy backend with an empty provider when an adapter supplies that
+// domain's measurements instead.
 func (a *App) WithCollect(sensor collect.Sensor) *App {
 	a.collectSources = append(a.collectSources, sensor)
 	return a
@@ -56,14 +57,23 @@ func (a *App) WithCollectAdapters(adapters ...CollectAdapter) *App {
 	return a
 }
 
-// collectSensors resolves registered sensors and adapters into toolkit sensors
-// sharing one collect cycle for this run. Registration errors and panics are
-// returned so the CLI exits 2 before anything is measured.
-func (a *App) collectSensors(timeout time.Duration) (sensors []toolkit.Sensor, err error) {
-	if len(a.collectSources) == 0 && len(a.collectAdapters) == 0 {
+// builtinCollect returns the stock CLI's collect-backed domains. A domain
+// moves here from the legacy sensor list in runCommand when it migrates.
+func (a *App) builtinCollect() ([]collect.Sensor, []CollectAdapter) {
+	return nil, nil
+}
+
+// collectSensors resolves registered sensors and adapters, plus the given
+// built-ins, into toolkit sensors sharing one collect cycle for this run.
+// Registration errors and panics are returned so the CLI exits 2 before
+// anything is measured.
+func (a *App) collectSensors(timeout time.Duration, builtinSources []collect.Sensor, builtinAdapters []CollectAdapter) (sensors []toolkit.Sensor, err error) {
+	sources := slices.Concat(a.collectSources, builtinSources)
+	adapters := slices.Concat(a.collectAdapters, builtinAdapters)
+	if len(sources) == 0 && len(adapters) == 0 {
 		return nil, nil
 	}
-	if len(a.collectAdapters) == 0 {
+	if len(adapters) == 0 {
 		return nil, fmt.Errorf("collect sensors registered without adapters; register adapters with WithCollectAdapters")
 	}
 	defer func() {
@@ -80,7 +90,7 @@ func (a *App) collectSensors(timeout time.Duration) (sensors []toolkit.Sensor, e
 	var requested []string
 	adapterNames := make(map[string]bool)
 	var bindings []collectbridge.Binding
-	for _, declared := range a.collectAdapters {
+	for _, declared := range adapters {
 		if isNilCollectInput(declared) {
 			return nil, fmt.Errorf("registered collect adapter cannot be nil")
 		}
@@ -103,7 +113,7 @@ func (a *App) collectSensors(timeout time.Duration) (sensors []toolkit.Sensor, e
 			Build: declared.Build, Errored: declared.Errored,
 		})
 	}
-	for _, source := range a.collectSources {
+	for _, source := range sources {
 		if isNilCollectInput(source) {
 			return nil, fmt.Errorf("registered collect sensor cannot be nil")
 		}

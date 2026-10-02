@@ -420,7 +420,8 @@ func (a *App) runCommand(args []string, stdout, stderr io.Writer) int {
 	if a.ib != nil {
 		sensors = append(sensors, toolkit.NewIBSensor(a.ib))
 	}
-	collectSensors, err := a.collectSensors(timeout)
+	builtinSources, builtinAdapters := a.builtinCollect()
+	collectSensors, err := a.collectSensors(timeout, builtinSources, builtinAdapters)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: register collect sensors: %v\n", a.prog, err)
 		return exitError
