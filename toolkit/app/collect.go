@@ -64,7 +64,9 @@ func (a *App) builtinCollect() ([]collect.Sensor, []CollectAdapter) {
 }
 
 // collectSensors resolves registered sensors and adapters, plus the given
-// built-ins, into toolkit sensors sharing one collect cycle for this run.
+// built-ins, collects every source once under one cycle, and returns toolkit
+// sensors that convert the cached observations. Each source gets its own
+// timeout budget; the toolkit watchdog then bounds only adapter conversion.
 // Registration errors and panics are returned so the CLI exits 2 before
 // anything is measured.
 func (a *App) collectSensors(timeout time.Duration, builtinSources []collect.Sensor, builtinAdapters []CollectAdapter) (sensors []toolkit.Sensor, err error) {
@@ -121,6 +123,7 @@ func (a *App) collectSensors(timeout time.Duration, builtinSources []collect.Sen
 			return nil, err
 		}
 	}
+	runner.Collect()
 	for _, binding := range bindings {
 		sensors = append(sensors, runner.Sensor(binding))
 	}

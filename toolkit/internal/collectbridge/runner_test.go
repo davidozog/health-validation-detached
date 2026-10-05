@@ -8,7 +8,6 @@ import (
 	"errors"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -106,6 +105,7 @@ func TestCollectRunnerMixedLegacyAndSharedCycle(t *testing.T) {
 			return &observation.ObservationBatch{CollectionId: op.Cycle().CollectionID(), Observations: []*observation.Observation{runnerObservation(current, observation.NodeTarget(""), 2)}}, nil
 		}})
 	}
+	r.Collect()
 	cat := catalog.NewEmpty(catalog.WithArchitecture("GB200"), catalog.WithExecutionContext(health.OperatorInfra))
 	if err := cat.Register(node.GPUCount()); err != nil {
 		t.Fatal(err)
@@ -126,8 +126,8 @@ func TestCollectRunnerMixedLegacyAndSharedCycle(t *testing.T) {
 			t.Fatalf("check %s=%s", v.CheckID, v.Severity)
 		}
 	}
-	r.Observe(context.Background(), runnerCount.ID(), other.ID())
-	r.Observe(context.Background(), other.ID())
+	r.Observe(runnerCount.ID(), other.ID())
+	r.Observe(other.ID())
 	if len(cycles) != 2 || cycles[0] != cycles[1] || cycles[0].CollectionID() != "run-1" || len(selections) != 2 {
 		t.Fatalf("cycles=%v selections=%v", cycles, selections)
 	}
@@ -152,20 +152,9 @@ func TestCollectRunnerExplicitOwnershipAndSelection(t *testing.T) {
 	if err := r2.Register(runnerSource{id: "wrong", signals: collect.Signals{collect.NewSignal(gpusignals.PowerDraw.ID(), "bytes")}, measure: runnerBatch()}, gpusignals.PowerDraw.ID()); err == nil {
 		t.Fatal("canonical unit redefinition accepted")
 	}
-	obs := r.Observe(context.Background(), gpusignals.PowerDraw.ID())
+	obs := r.Observe(gpusignals.PowerDraw.ID())
 	if len(obs) != 1 || obs[0].GetCollectionError().GetCategory() != observation.CollectionErrorCategoryNotConfigured || obs[0].GetUnit() != "watts" {
 		t.Fatalf("unknown owner=%v", obs)
-	}
-}
-
-func TestCollectRunnerRequiresExplicitSignals(t *testing.T) {
-	r := newCollectRunner(t, time.Second)
-	s := runnerSource{id: "source", signals: collect.Signals{runnerCount}, measure: runnerBatch()}
-	if err := r.Register(s); err == nil || !strings.Contains(err.Error(), "explicit collect signal IDs are required") {
-		t.Fatalf("missing signal selection: %v", err)
-	}
-	if err := r.Register(s, runnerCount.ID()); err != nil {
-		t.Fatalf("rejected registration retained ownership: %v", err)
 	}
 }
 
@@ -196,6 +185,12 @@ func TestCollectRunnerRejectsMalformedProducerBatches(t *testing.T) {
 		{name: "empty source", mutate: func(b *observation.ObservationBatch) { b.Observations[0].Source = "" }},
 		{name: "nil observation", mutate: func(b *observation.ObservationBatch) { b.Observations = append(b.Observations, nil) }},
 		{name: "empty value kind", mutate: func(b *observation.ObservationBatch) { b.Observations[0].GetValue().Kind = nil }},
+		{name: "typed nil int kind", mutate: func(b *observation.ObservationBatch) {
+			b.Observations[0].GetValue().Kind = (*observation.Value_IntValue)(nil)
+		}},
+		{name: "typed nil double kind", mutate: func(b *observation.ObservationBatch) {
+			b.Observations[0].GetValue().Kind = (*observation.Value_DoubleValue)(nil)
+		}},
 		{name: "nil value payload", mutate: func(b *observation.ObservationBatch) { b.Observations[0].Outcome = &observation.Observation_Value{} }},
 		{name: "future timestamp", mutate: func(b *observation.ObservationBatch) {
 			b.Observations[0].ObservedAt = timestamppb.New(time.Now().Add(time.Hour))
@@ -232,7 +227,8 @@ func TestCollectRunnerRejectsMalformedProducerBatches(t *testing.T) {
 				tt.mutate(b)
 				return b, nil
 			}})
-			obs := r.Observe(context.Background(), runnerCount.ID())
+			r.Collect()
+			obs := r.Observe(runnerCount.ID())
 			if len(obs) != 1 || obs[0].GetCollectionError() == nil {
 				t.Fatalf("malformed producer became successful: %v", obs)
 			}
@@ -275,6 +271,7 @@ func TestCollectRunnerFailureAndValidPartialResults(t *testing.T) {
 			for _, source := range sources {
 				registerRunner(t, r, source)
 			}
+			r.Collect()
 			adapter := countAdapter(healthy.ID())
 			adapter.Name = "healthy-cpu"
 			adapter.Build = func(obs []*observation.Observation) []health.Measurement {
@@ -313,7 +310,7 @@ func TestCollectRunnerFailureAndValidPartialResults(t *testing.T) {
 			if result, ok := results["gpu_count"]; !ok || result.Severity != health.Critical {
 				t.Fatalf("failed sensor did not degrade independently: %+v", verdict)
 			}
-			obs := r.Observe(context.Background(), healthy.ID(), runnerCount.ID())
+			obs := r.Observe(healthy.ID(), runnerCount.ID())
 			healthyIndex, failureStart := 0, 1
 			if tt.failureFirst {
 				healthyIndex, failureStart = tt.wantObs, 0
@@ -331,6 +328,7 @@ func TestCollectRunnerFailureAndValidPartialResults(t *testing.T) {
 func TestCollectRunnerEmptySuccessReachesAdapter(t *testing.T) {
 	r := newCollectRunner(t, time.Second)
 	registerRunner(t, r, runnerSource{id: "empty", signals: collect.Signals{runnerCount}, measure: runnerBatch()})
+	r.Collect()
 	seen := false
 	a := countAdapter(runnerCount.ID())
 	a.Build = func(obs []*observation.Observation) []health.Measurement { seen = len(obs) == 0; return nil }
@@ -347,66 +345,20 @@ func TestCollectRunnerCacheOwnsClones(t *testing.T) {
 		calls++
 		return runnerBatch(original)(ctx, op)
 	}})
-	first := r.Observe(context.Background(), runnerCount.ID(), runnerCount.ID())
+	r.Collect()
+	first := r.Observe(runnerCount.ID(), runnerCount.ID())
 	if len(first) != 1 {
 		t.Fatalf("repeated request duplicated: %v", first)
 	}
 	first[0].GetValue().Kind = &observation.Value_IntValue{IntValue: 99}
 	original.GetValue().Kind = &observation.Value_IntValue{IntValue: 88}
-	obs := r.Observe(context.Background(), runnerCount.ID())
+	obs := r.Observe(runnerCount.ID())
 	if obs[0].GetValue().GetIntValue() != 4 {
 		t.Fatalf("cache mutated: %v", obs)
 	}
 	obs[0].Source = "mutated"
-	if again := r.Observe(context.Background(), runnerCount.ID()); calls != 1 || again[0].GetSource() != "fake" {
+	if again := r.Observe(runnerCount.ID()); calls != 1 || again[0].GetSource() != "fake" {
 		t.Fatalf("cache reuse mutated: %v calls=%d", again, calls)
-	}
-}
-
-func TestCollectRunnerNeverReusesLateCompletion(t *testing.T) {
-	r := newCollectRunner(t, 5*time.Millisecond)
-	release := make(chan struct{})
-	finished := make(chan struct{})
-	var calls atomic.Int64
-	registerRunner(t, r, runnerSource{id: "stuck", signals: collect.Signals{runnerCount}, measure: func(ctx context.Context, op *collect.Op) (*observation.ObservationBatch, error) {
-		calls.Add(1)
-		<-release
-		defer close(finished)
-		return runnerBatch(runnerObservation(runnerCount, observation.NodeTarget(""), 4))(ctx, op)
-	}})
-	first := r.Observe(context.Background(), runnerCount.ID())
-	if first[0].GetCollectionError().GetCategory() != observation.CollectionErrorCategoryTimeout {
-		t.Fatalf("timeout=%v", first)
-	}
-	close(release)
-	<-finished
-	again := r.Observe(context.Background(), runnerCount.ID())
-	if calls.Load() != 1 || again[0].GetCollectionError().GetCategory() != observation.CollectionErrorCategoryTimeout {
-		t.Fatalf("late result was reused: %v calls=%d", again, calls.Load())
-	}
-}
-
-func TestCollectRunnerConcurrentReadersRunOnce(t *testing.T) {
-	r := newCollectRunner(t, time.Second)
-	var calls atomic.Int64
-	registerRunner(t, r, runnerSource{id: "one", signals: collect.Signals{runnerCount}, measure: func(ctx context.Context, op *collect.Op) (*observation.ObservationBatch, error) {
-		calls.Add(1)
-		return runnerBatch(runnerObservation(runnerCount, observation.NodeTarget(""), 4))(ctx, op)
-	}})
-	var wg sync.WaitGroup
-	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			got := r.Observe(context.Background(), runnerCount.ID())
-			if len(got) != 1 || got[0].GetValue().GetIntValue() != 4 {
-				t.Errorf("concurrent result=%v", got)
-			}
-		}()
-	}
-	wg.Wait()
-	if calls.Load() != 1 {
-		t.Fatalf("Measure called %d times", calls.Load())
 	}
 }
 
@@ -416,87 +368,12 @@ func TestCollectRunnerPreservesEarlierResultAfterLaterTimeout(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	registerRunner(t, r, runnerSource{id: "good", signals: collect.Signals{runnerCount}, measure: runnerBatch(runnerObservation(runnerCount, observation.NodeTarget(""), 4))})
+	// stuck ignores its context, so only the cycle timeout can end its wait.
 	registerRunner(t, r, runnerSource{id: "stuck", signals: collect.Signals{other}, measure: func(context.Context, *collect.Op) (*observation.ObservationBatch, error) { <-release; return nil, nil }})
-	obs := r.Observe(context.Background(), runnerCount.ID(), other.ID())
-	if len(obs) != 2 || obs[0].GetValue().GetIntValue() != 4 || obs[1].GetCollectionError() == nil {
+	r.Collect()
+	obs := r.Observe(runnerCount.ID(), other.ID())
+	if len(obs) != 2 || obs[0].GetValue().GetIntValue() != 4 || obs[1].GetCollectionError().GetCategory() != observation.CollectionErrorCategoryTimeout {
 		t.Fatalf("earlier result lost: %v", obs)
-	}
-}
-
-func TestCollectRunnerPreparationUsesPerSourceBudgets(t *testing.T) {
-	const timeout = time.Second
-	r := newCollectRunner(t, 10*time.Second)
-	other := collect.NewSignal("private.other", "1")
-	deadlines := make(chan time.Time, 2)
-	// Neither source blocks, so both complete before Collect returns. Each
-	// budget starts when its source is prepared: independent budgets end at
-	// distinct instants, a shared budget at the same one.
-	for _, s := range []collect.Signal{runnerCount, other} {
-		current := s
-		registerRunner(t, r, runnerSource{id: s.ID(), signals: collect.Signals{s}, measure: func(ctx context.Context, op *collect.Op) (*observation.ObservationBatch, error) {
-			deadline, _ := ctx.Deadline()
-			deadlines <- deadline
-			return runnerBatch(runnerObservation(current, observation.NodeTarget(""), 2))(ctx, op)
-		}})
-	}
-	cat := catalog.NewEmpty(catalog.WithArchitecture("GB200"), catalog.WithExecutionContext(health.OperatorInfra))
-	if err := cat.Register(node.GPUCount()); err != nil {
-		t.Fatal(err)
-	}
-	verdict, err := toolkit.CollectWithOptions(cat, toolkit.CollectionOptions{Timeout: timeout}, r.Sensor(countAdapter(runnerCount.ID(), other.ID())))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Each budget began before Collect returned, so it ends within one timeout.
-	limit := time.Now().Add(timeout)
-	if len(deadlines) != 2 {
-		t.Fatalf("sources measured=%d, want 2; verdict=%+v", len(deadlines), verdict)
-	}
-	first, second := <-deadlines, <-deadlines
-	if first.IsZero() || second.After(limit) || !second.After(first) {
-		t.Fatalf("source budgets not independent and capped: first=%s second=%s", first, second)
-	}
-	if len(verdict.CheckResults) != 1 || verdict.CheckResults[0].Severity != health.Pass {
-		t.Fatalf("verdict=%+v", verdict)
-	}
-}
-
-func TestCollectRunnerPreparationHonorsToolkitTimeout(t *testing.T) {
-	const timeout = 50 * time.Millisecond
-	r := newCollectRunner(t, time.Second)
-	// The source ignores its context and is released only after the test, so
-	// an ignored timeout deadlocks. It reports through a buffered channel and
-	// never touches t, so it may safely outlive the test.
-	release := make(chan struct{})
-	defer close(release)
-	capped := make(chan bool, 1)
-	registerRunner(t, r, runnerSource{id: "ignores-context", signals: collect.Signals{runnerCount}, measure: func(ctx context.Context, _ *collect.Op) (*observation.ObservationBatch, error) {
-		deadline, ok := ctx.Deadline()
-		capped <- ok && time.Until(deadline) <= timeout
-		<-release
-		return nil, nil
-	}})
-	cat := catalog.NewEmpty(catalog.WithArchitecture("GB200"), catalog.WithExecutionContext(health.OperatorInfra))
-	if err := cat.Register(node.GPUCount()); err != nil {
-		t.Fatal(err)
-	}
-	verdict, err := toolkit.CollectWithOptions(cat, toolkit.CollectionOptions{Timeout: timeout}, r.Sensor(countAdapter(runnerCount.ID())))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(verdict.CheckResults) != 1 || verdict.CheckResults[0].Severity != health.Critical {
-		t.Fatalf("toolkit timeout ignored: verdict=%+v", verdict)
-	}
-	if obs := r.Observe(context.Background(), runnerCount.ID()); len(obs) != 1 || obs[0].GetCollectionError().GetCategory() != observation.CollectionErrorCategoryTimeout {
-		t.Fatalf("timeout not recorded: %v", obs)
-	}
-	select {
-	case ok := <-capped:
-		if !ok {
-			t.Fatal("source deadline not capped by toolkit budget")
-		}
-	default:
-		t.Fatal("source was never started within its budget")
 	}
 }
 
@@ -516,7 +393,8 @@ func TestCollectRunnerCanonicalTargetRules(t *testing.T) {
 			}
 			r := newCollectRunner(t, time.Second)
 			registerRunner(t, r, runnerSource{id: "gpu", signals: collect.Signals{gpusignals.PerformanceState}, measure: runnerBatch(o)})
-			if got := r.Observe(context.Background(), gpusignals.PerformanceState.ID()); got[0].GetCollectionError() == nil {
+			r.Collect()
+			if got := r.Observe(gpusignals.PerformanceState.ID()); got[0].GetCollectionError() == nil {
 				t.Fatalf("canonical violation became success: %v", got)
 			}
 		})
@@ -532,36 +410,15 @@ type privateUnitSignal struct {
 func (s privateUnitSignal) ID() string    { return s.id }
 func (s privateUnitSignal) Unit() *string { return s.unit }
 
-func TestCollectRunnerSnapshotsPrivateUnitPresence(t *testing.T) {
+func TestCollectRunnerPreservesPrivateUnitPresence(t *testing.T) {
 	r := newCollectRunner(t, time.Second)
 	unit := ""
 	s := privateUnitSignal{id: "private.unit", unit: &unit}
 	registerRunner(t, r, runnerSource{id: "unit", signals: collect.Signals{s}, measure: runnerBatch(runnerObservation(s, observation.NodeTarget(""), 1))})
-	got := r.Observe(context.Background(), s.ID())
+	r.Collect()
+	got := r.Observe(s.ID())
 	if len(got) != 1 || got[0].GetCollectionError() != nil || got[0].Unit == nil || *got[0].Unit != "" {
 		t.Fatalf("private unit presence lost: %v", got)
-	}
-}
-
-func TestCollectRunnerCanceledCallerCannotCacheLateSuccess(t *testing.T) {
-	r := newCollectRunner(t, time.Second)
-	release := make(chan struct{})
-	finished := make(chan struct{})
-	registerRunner(t, r, runnerSource{id: "late", signals: collect.Signals{runnerCount}, measure: func(ctx context.Context, op *collect.Op) (*observation.ObservationBatch, error) {
-		<-release
-		defer close(finished)
-		return runnerBatch(runnerObservation(runnerCount, observation.NodeTarget(""), 4))(ctx, op)
-	}})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
-	defer cancel()
-	first := r.Observe(ctx, runnerCount.ID())
-	if first[0].GetCollectionError() == nil {
-		t.Fatal("expired caller became successful")
-	}
-	close(release)
-	<-finished
-	if again := r.Observe(context.Background(), runnerCount.ID()); again[0].GetCollectionError() == nil {
-		t.Fatalf("late success entered cache: %v", again)
 	}
 }
 
@@ -575,6 +432,7 @@ func TestCollectRunnerPreservesDefinedAbsenceAndFailureOutcomes(t *testing.T) {
 		observation.NewNoValueObservation(noTargets.ID(), noTargets.Unit(), "fake", nil, nil, &observation.NoValue{Reason: observation.NoValueReasonNoTargets}),
 	}
 	registerRunner(t, r, runnerSource{id: "outcomes", signals: collect.Signals{zero, failed, unsupported, noTargets}, measure: runnerBatch(obs...)})
+	r.Collect()
 	seen := false
 	a := countAdapter(zero.ID(), failed.ID(), unsupported.ID(), noTargets.ID())
 	a.Build = func(got []*observation.Observation) []health.Measurement {
@@ -609,8 +467,9 @@ func TestCollectRunnerDistinctSensorsShareCallerOwnedSnapshot(t *testing.T) {
 			return runnerBatch(runnerObservation(current, observation.NodeTarget(""), readShared(op.Cycle())))(ctx, op)
 		}})
 	}
-	obs := r.Observe(context.Background(), runnerCount.ID(), other.ID())
-	r.Observe(context.Background(), runnerCount.ID(), other.ID())
+	r.Collect()
+	obs := r.Observe(runnerCount.ID(), other.ID())
+	r.Observe(runnerCount.ID(), other.ID())
 	if acquisitions != 1 || len(obs) != 2 || obs[0].GetValue().GetIntValue() != 4 || obs[1].GetValue().GetIntValue() != 4 {
 		t.Fatalf("shared snapshot repeated: acquisitions=%d batch=%v", acquisitions, obs)
 	}

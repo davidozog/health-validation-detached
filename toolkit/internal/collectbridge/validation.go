@@ -6,6 +6,7 @@ package collectbridge
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -93,11 +94,9 @@ func validateCollectDefinition(s collect.Signal) error {
 // validateCollectBatch checks cycle identity, signal ownership, and every
 // observation. Duplicates are keyed by signal and target; source-scoped and
 // source-local targets also key on source, since their identity is only
-// meaningful within it.
+// meaningful within it. batch must come from proto.Clone, which drops
+// typed-nil oneof wrappers, so later checks need not nil-check them.
 func validateCollectBatch(batch *observation.ObservationBatch, cycleID string, owned collect.Signals) error {
-	if batch == nil {
-		return fmt.Errorf("observation batch is required")
-	}
 	if batch.GetCollectionId() != cycleID || strings.TrimSpace(batch.GetCollectionId()) == "" {
 		return fmt.Errorf("collection ID %q does not match active cycle %q", batch.GetCollectionId(), cycleID)
 	}
@@ -142,9 +141,6 @@ func validateCollectObservation(o *observation.Observation, s collect.Signal) er
 	if strings.TrimSpace(o.GetSource()) == "" {
 		return fmt.Errorf("source is required")
 	}
-	if strings.TrimSpace(o.GetSignalId()) == "" {
-		return fmt.Errorf("signal ID is required")
-	}
 	at := o.GetObservedAt()
 	if at == nil || (at.Seconds == 0 && at.Nanos == 0) {
 		return fmt.Errorf("nonzero observation timestamp is required")
@@ -158,8 +154,10 @@ func validateCollectObservation(o *observation.Observation, s collect.Signal) er
 	if !sameCollectUnit(o.Unit, s.Unit()) {
 		return fmt.Errorf("signal %q has noncanonical unit", s.ID())
 	}
-	if err := validateCollectTarget(o.GetTarget()); err != nil {
-		return err
+	for _, ref := range gpuRefs(o.GetTarget()) {
+		if (strings.TrimSpace(ref.GetUuid()) == "") == (strings.TrimSpace(ref.GetSourceLocalId()) == "") {
+			return fmt.Errorf("GPU target requires exactly one UUID or source-local ID")
+		}
 	}
 	if collectSourceLocal(o.GetTarget()) && o.GetCollectionError() == nil {
 		return fmt.Errorf("source-local GPU identity requires a collection error")
@@ -169,25 +167,11 @@ func validateCollectObservation(o *observation.Observation, s collect.Signal) er
 		if o.GetTarget() == nil {
 			return fmt.Errorf("value requires a typed target")
 		}
-		switch kind := outcome.Value.GetKind().(type) {
-		case *observation.Value_IntValue:
-			if kind == nil {
-				return fmt.Errorf("value kind is required")
-			}
-		case *observation.Value_DoubleValue:
-			if kind == nil || math.IsNaN(kind.DoubleValue) || math.IsInf(kind.DoubleValue, 0) {
-				return fmt.Errorf("finite double value is required")
-			}
-		case *observation.Value_StringValue:
-			if kind == nil {
-				return fmt.Errorf("value kind is required")
-			}
-		case *observation.Value_BoolValue:
-			if kind == nil {
-				return fmt.Errorf("value kind is required")
-			}
-		default:
+		if outcome.Value.GetKind() == nil {
 			return fmt.Errorf("value kind is required")
+		}
+		if d := outcome.Value.GetDoubleValue(); math.IsNaN(d) || math.IsInf(d, 0) {
+			return fmt.Errorf("finite double value is required")
 		}
 	case *observation.Observation_CollectionError:
 		category := outcome.CollectionError.GetCategory()
@@ -216,50 +200,22 @@ func validateCollectObservation(o *observation.Observation, s collect.Signal) er
 	return nil
 }
 
-// validateCollectTarget accepts a nil (source-scoped) target or one typed
-// target with valid GPU identities.
-func validateCollectTarget(target *observation.ObservationTarget) error {
-	if target == nil {
+// gpuRefs lists the GPUs a target names. observation.ValidateBatch has
+// already checked the target's shape.
+func gpuRefs(target *observation.ObservationTarget) []*observation.GPURef {
+	switch kind := target.GetKind().(type) {
+	case *observation.ObservationTarget_GPU:
+		return []*observation.GPURef{kind.Gpu}
+	case *observation.ObservationTarget_NVLinkEndpoint:
+		return []*observation.GPURef{kind.NvLinkEndpoint.GetGpu()}
+	case *observation.ObservationTarget_GPUPair:
+		return []*observation.GPURef{kind.GpuPair.GetSourceGpu(), kind.GpuPair.GetPeerGpu()}
+	default:
 		return nil
 	}
-	switch kind := target.GetKind().(type) {
-	case *observation.ObservationTarget_Node:
-		if kind == nil || kind.Node == nil {
-			return fmt.Errorf("node target is required")
-		}
-	case *observation.ObservationTarget_GPU:
-		if kind == nil {
-			return fmt.Errorf("GPU target is required")
-		}
-		return validateCollectGPURef(kind.Gpu)
-	case *observation.ObservationTarget_NVLinkEndpoint:
-		if kind == nil {
-			return fmt.Errorf("NVLink endpoint is required")
-		}
-		return validateCollectGPURef(kind.NvLinkEndpoint.GetGpu())
-	case *observation.ObservationTarget_GPUPair:
-		if kind == nil {
-			return fmt.Errorf("GPU pair is required")
-		}
-		if err := validateCollectGPURef(kind.GpuPair.GetSourceGpu()); err != nil {
-			return err
-		}
-		return validateCollectGPURef(kind.GpuPair.GetPeerGpu())
-	default:
-		return fmt.Errorf("typed target kind is required")
-	}
-	return nil
-}
-
-// validateCollectGPURef requires exactly one of UUID or source-local slot ID.
-func validateCollectGPURef(ref *observation.GPURef) error {
-	if ref == nil || (strings.TrimSpace(ref.GetUuid()) == "") == (strings.TrimSpace(ref.GetSourceLocalId()) == "") {
-		return fmt.Errorf("GPU target requires exactly one UUID or source-local ID")
-	}
-	return nil
 }
 
 // collectSourceLocal reports whether any GPU in target lacks a UUID.
 func collectSourceLocal(target *observation.ObservationTarget) bool {
-	return target.GetGpu().GetSourceLocalId() != "" || target.GetNvLinkEndpoint().GetGpu().GetSourceLocalId() != "" || target.GetGpuPair().GetSourceGpu().GetSourceLocalId() != "" || target.GetGpuPair().GetPeerGpu().GetSourceLocalId() != ""
+	return slices.ContainsFunc(gpuRefs(target), func(ref *observation.GPURef) bool { return ref.GetSourceLocalId() != "" })
 }

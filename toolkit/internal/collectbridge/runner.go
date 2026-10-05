@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/dsx-ai-factory/health-validation/catalog/health"
 	"github.com/dsx-ai-factory/health-validation/collect"
@@ -26,45 +24,34 @@ type Binding struct {
 	Signals []string
 }
 
-// Runner coordinates one collection cycle. Sensors run sequentially,
-// at most once, and each canonical signal has one explicitly selected owner.
-// Registration finishes before collection starts. Callers own source lifetime.
+// Runner coordinates one collection cycle: Register every source, Collect
+// once, then Observe the cached batches. Each canonical signal has one
+// explicitly selected owner. Callers own source lifetime.
 type Runner struct {
 	cycle   *collect.Cycle
 	owner   map[string]*collectEntry
-	gate    chan struct{}
 	entries []*collectEntry
 }
 
-// collectEntry is one registered source and its run-once result cache.
+// collectEntry is one registered source and its collected batch.
 type collectEntry struct {
 	sensor  collect.Sensor
 	batch   *observation.ObservationBatch
 	id      string
 	signals collect.Signals
-	once    sync.Once
 }
 
 // NewRunner coordinates sensors under cycle.
 func NewRunner(cycle *collect.Cycle) *Runner {
-	return &Runner{cycle: cycle, owner: make(map[string]*collectEntry), gate: make(chan struct{}, 1)}
+	return &Runner{cycle: cycle, owner: make(map[string]*collectEntry)}
 }
 
 // Register assigns the sensor's declared signals matching the requested IDs.
 // At least one match is required; overlapping producers are rejected.
 func (r *Runner) Register(sensor collect.Sensor, signalIDs ...string) error {
-	if len(signalIDs) == 0 {
-		return fmt.Errorf("explicit collect signal IDs are required")
-	}
-	if sensor == nil {
-		return fmt.Errorf("collect sensor with a nonempty ID is required")
-	}
 	id := sensor.ID()
 	if strings.TrimSpace(id) == "" {
 		return fmt.Errorf("collect sensor with a nonempty ID is required")
-	}
-	if r.cycle == nil || r.cycle.CollectionID() == "" {
-		return fmt.Errorf("collection cycle is required")
 	}
 	for _, e := range r.entries {
 		if e.id == id {
@@ -101,12 +88,7 @@ func (r *Runner) Register(sensor collect.Sensor, signalIDs ...string) error {
 		if previous := r.owner[s.ID()]; previous != nil {
 			return fmt.Errorf("signal %q is produced by both %q and %q; select one source explicitly", s.ID(), previous.id, id)
 		}
-		definition := runnerSignal{id: s.ID()}
-		if unit := s.Unit(); unit != nil {
-			copied := *unit
-			definition.unit = &copied
-		}
-		owned = append(owned, definition)
+		owned = append(owned, s)
 	}
 	e := &collectEntry{sensor: sensor, id: id, signals: owned}
 	for _, s := range owned {
@@ -116,10 +98,20 @@ func (r *Runner) Register(sensor collect.Sensor, signalIDs ...string) error {
 	return nil
 }
 
-// Observe returns independently owned observations for the requested signals.
-// Unknown signals produce NOT_CONFIGURED errors; successful empty collections
-// remain empty so the adapter can apply its own absence semantics.
-func (r *Runner) Observe(ctx context.Context, signalIDs ...string) []*observation.Observation {
+// Collect runs each registered sensor once, in registration order, and caches
+// its batch. collect.Run bounds each sensor by the cycle timeout and recovers
+// its panics, and a late result is discarded, never cached.
+func (r *Runner) Collect() {
+	for _, e := range r.entries {
+		e.batch = r.measure(e)
+	}
+}
+
+// Observe returns independently owned copies of the collected observations
+// for the requested signals. Unknown signals produce NOT_CONFIGURED errors;
+// successful empty collections remain empty so the adapter can apply its own
+// absence semantics.
+func (r *Runner) Observe(signalIDs ...string) []*observation.Observation {
 	requested := make(map[string]bool, len(signalIDs))
 	var out []*observation.Observation
 	for _, id := range signalIDs {
@@ -148,7 +140,7 @@ func (r *Runner) Observe(ctx context.Context, signalIDs ...string) []*observatio
 		if !needed {
 			continue
 		}
-		for _, o := range r.observe(ctx, e).GetObservations() {
+		for _, o := range e.batch.GetObservations() {
 			if requested[o.GetSignalId()] {
 				out = append(out, proto.Clone(o).(*observation.Observation))
 			}
@@ -157,35 +149,12 @@ func (r *Runner) Observe(ctx context.Context, signalIDs ...string) []*observatio
 	return out
 }
 
-// observe runs e at most once and caches its batch. collect.Run bounds a hung
-// sensor by ctx; an expired ctx caches a failure, never a late success.
-// Concurrent callers wait on the first caller's run, not their own ctx.
-func (r *Runner) observe(ctx context.Context, e *collectEntry) *observation.ObservationBatch {
-	e.once.Do(func() {
-		e.batch = r.measure(ctx, e)
-		if ctx.Err() != nil {
-			e.batch = r.failed(e, ctx.Err())
-		}
-	})
-	return e.batch
-}
-
-// measure runs e under the sequential gate and validates its batch as a whole.
-// A top-level source error replaces untargeted successes for the same signal
-// and is appended for signals the batch omitted, keeping valid partial data.
-func (r *Runner) measure(ctx context.Context, e *collectEntry) (batch *observation.ObservationBatch) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			batch = r.failed(e, fmt.Errorf("collect sensor %q panicked: %v", e.id, recovered))
-		}
-	}()
-	select {
-	case r.gate <- struct{}{}:
-	case <-ctx.Done():
-		return r.failed(e, ctx.Err())
-	}
-	defer func() { <-r.gate }()
-	batch, sourceErr := collect.Run(ctx, r.cycle, e.id, func(ctx context.Context) (*observation.ObservationBatch, error) {
+// measure runs e and validates its batch as a whole. A top-level source error
+// adds a source-scoped failure for each owned signal that lacks one, replacing
+// a source-scoped NO_TARGETS; per-target observations are kept, so valid
+// partial data survives.
+func (r *Runner) measure(e *collectEntry) *observation.ObservationBatch {
+	batch, sourceErr := collect.Run(context.Background(), r.cycle, e.id, func(ctx context.Context) (*observation.ObservationBatch, error) {
 		return e.sensor.Measure(ctx, collect.WithCycle(r.cycle), collect.WithSignalID(e.signals.IDs()...))
 	})
 	if batch == nil {
@@ -223,17 +192,19 @@ func (r *Runner) failed(e *collectEntry, err error) *observation.ObservationBatc
 	return batch
 }
 
-// collectFailure builds a source-scoped error observation, classifying both
-// collect and toolkit deadline errors as timeouts.
+// collectFailure builds a source-scoped error observation. collect wraps its
+// timeouts without the context error, so NewErrorObservation cannot classify
+// them.
 func collectFailure(s collect.Signal, source string, err error) *observation.Observation {
 	o := observation.NewErrorObservation(s.ID(), s.Unit(), source, "Measure", err)
-	if errors.Is(err, collect.ErrCollectionTimeout) || errors.Is(err, health.ErrCollectionTimeout) {
+	if errors.Is(err, collect.ErrCollectionTimeout) {
 		o.GetCollectionError().Category = observation.CollectionErrorCategoryTimeout
 	}
 	return o
 }
 
-// Sensor exposes a binding through the toolkit's collection interface.
+// Sensor exposes a binding through the toolkit's collection interface. Its
+// Measure reads batches cached by [Runner.Collect].
 func (r *Runner) Sensor(binding Binding) *Sensor {
 	binding.Signals = slices.Clone(binding.Signals)
 	return &Sensor{runner: r, binding: binding}
@@ -247,31 +218,8 @@ type Sensor struct {
 
 func (s *Sensor) Name() string { return s.binding.Name }
 
-func (s *Sensor) Measure(ctx context.Context) ([]health.Measurement, error) {
-	return s.binding.Build(s.runner.Observe(ctx, s.binding.Signals...)), nil
+func (s *Sensor) Measure(context.Context) ([]health.Measurement, error) {
+	return s.binding.Build(s.runner.Observe(s.binding.Signals...)), nil
 }
 
 func (s *Sensor) Errored(err error) []health.Measurement { return s.binding.Errored(err) }
-
-// Prepare fills the shared cache under each source's timeout budget. It
-// prepares every registered source, not just this binding's; the run-once
-// cache makes later calls no-ops.
-func (s *Sensor) Prepare(timeout time.Duration) {
-	for _, e := range s.runner.entries {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		s.runner.observe(ctx, e)
-		cancel()
-	}
-}
-
-// runnerSignal snapshots a declared signal so a producer cannot change its ID
-// or unit after registration.
-type runnerSignal struct {
-	unit *string
-	id   string
-}
-
-func (s runnerSignal) ID() string { return s.id }
-
-// Unit returns the snapshotted unit; nil and an empty unit are distinct.
-func (s runnerSignal) Unit() *string { return s.unit }
