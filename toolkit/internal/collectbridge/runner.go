@@ -38,14 +38,11 @@ type Runner struct {
 
 // collectEntry is one registered source and its run-once result cache.
 type collectEntry struct {
-	sensor    collect.Sensor
-	batch     *observation.ObservationBatch
-	ready     chan struct{}
-	cancel    context.CancelFunc
-	id        string
-	signals   collect.Signals
-	once      sync.Once
-	completed sync.Once
+	sensor  collect.Sensor
+	batch   *observation.ObservationBatch
+	id      string
+	signals collect.Signals
+	once    sync.Once
 }
 
 // NewRunner coordinates sensors under cycle.
@@ -111,7 +108,7 @@ func (r *Runner) Register(sensor collect.Sensor, signalIDs ...string) error {
 		}
 		owned = append(owned, definition)
 	}
-	e := &collectEntry{sensor: sensor, id: id, signals: owned, ready: make(chan struct{})}
+	e := &collectEntry{sensor: sensor, id: id, signals: owned}
 	for _, s := range owned {
 		r.owner[s.ID()] = e
 	}
@@ -123,13 +120,13 @@ func (r *Runner) Register(sensor collect.Sensor, signalIDs ...string) error {
 // Unknown signals produce NOT_CONFIGURED errors; successful empty collections
 // remain empty so the adapter can apply its own absence semantics.
 func (r *Runner) Observe(ctx context.Context, signalIDs ...string) []*observation.Observation {
-	want := make(map[string]bool, len(signalIDs))
+	requested := make(map[string]bool, len(signalIDs))
 	var out []*observation.Observation
 	for _, id := range signalIDs {
-		if want[id] {
+		if requested[id] {
 			continue
 		}
-		want[id] = true
+		requested[id] = true
 		if r.owner[id] == nil {
 			s := collect.NewSignal(id, "")
 			if rule, ok := canonical[id]; ok {
@@ -143,7 +140,7 @@ func (r *Runner) Observe(ctx context.Context, signalIDs ...string) []*observatio
 	for _, e := range r.entries {
 		needed := false
 		for _, s := range e.signals {
-			if want[s.ID()] {
+			if requested[s.ID()] {
 				needed = true
 				break
 			}
@@ -152,7 +149,7 @@ func (r *Runner) Observe(ctx context.Context, signalIDs ...string) []*observatio
 			continue
 		}
 		for _, o := range r.observe(ctx, e).GetObservations() {
-			if want[o.GetSignalId()] {
+			if requested[o.GetSignalId()] {
 				out = append(out, proto.Clone(o).(*observation.Observation))
 			}
 		}
@@ -160,35 +157,17 @@ func (r *Runner) Observe(ctx context.Context, signalIDs ...string) []*observatio
 	return out
 }
 
-// observe starts e at most once and waits for its batch. If ctx expires first,
-// the failure is cached and the source canceled, so a late result can never
-// replace it.
+// observe runs e at most once and caches its batch. collect.Run bounds a hung
+// sensor by ctx; an expired ctx caches a failure, never a late success.
+// Concurrent callers wait on the first caller's run, not their own ctx.
 func (r *Runner) observe(ctx context.Context, e *collectEntry) *observation.ObservationBatch {
 	e.once.Do(func() {
-		callCtx, cancel := context.WithCancel(ctx)
-		e.cancel = cancel
-		go func() {
-			defer cancel()
-			batch := r.measure(callCtx, e)
-			if callCtx.Err() != nil {
-				batch = r.failed(e, callCtx.Err())
-			}
-			e.complete(batch)
-		}()
+		e.batch = r.measure(ctx, e)
+		if ctx.Err() != nil {
+			e.batch = r.failed(e, ctx.Err())
+		}
 	})
-	select {
-	case <-e.ready:
-		return e.batch
-	case <-ctx.Done():
-		e.complete(r.failed(e, ctx.Err()))
-		e.cancel()
-		return e.batch
-	}
-}
-
-// complete caches batch if e has no result yet; the first completion wins.
-func (e *collectEntry) complete(batch *observation.ObservationBatch) {
-	e.completed.Do(func() { e.batch = batch; close(e.ready) })
+	return e.batch
 }
 
 // measure runs e under the sequential gate and validates its batch as a whole.

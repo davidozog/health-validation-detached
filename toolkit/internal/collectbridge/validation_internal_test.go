@@ -6,6 +6,7 @@ package collectbridge
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dsx-ai-factory/health-validation/collect"
 	"github.com/dsx-ai-factory/health-validation/collect/observation"
@@ -16,7 +17,7 @@ import (
 func TestCanonicalTargetKinds(t *testing.T) {
 	value := func(s collect.Signal, target *observation.ObservationTarget) *observation.Observation {
 		return &observation.Observation{
-			SignalId: s.ID(), Source: "test", Target: target, ObservedAt: timestamppb.Now(), Unit: s.Unit(),
+			SignalId: s.ID(), Source: "test", Target: target, ObservedAt: timestamppb.New(time.Unix(1, 0)), Unit: s.Unit(),
 			Outcome: &observation.Observation_Value{Value: &observation.Value{Kind: &observation.Value_IntValue{IntValue: 1}}},
 		}
 	}
