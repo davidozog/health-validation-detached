@@ -14,10 +14,14 @@ go_library(
     deps = [
         "//catalog",
         "//catalog/health",
+        "//collect/observation",
         "//toolkit",
         "//toolkit/internal/version",
+        "//toolkit/observations",
         "//toolkit/otelmetrics",
+        "@com_github_google_uuid//:uuid",
         "@in_gopkg_yaml_v3//:yaml_v3",
+        "@org_golang_google_protobuf//encoding/protojson",
     ] + select({
         "@rules_go//go/platform:linux": [
             "//toolkit/nvml",
@@ -42,6 +46,9 @@ go_test(
         "//catalog/health",
         "//catalog/node",
         "//catalog/nvlink",
+        "//collect/observation",
         "//toolkit",
+        "//toolkit/observations",
+        "@org_golang_google_protobuf//encoding/protojson",
     ],
 )
