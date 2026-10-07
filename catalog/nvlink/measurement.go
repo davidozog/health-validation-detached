@@ -98,6 +98,9 @@ func (m *NVLinkMeasurement) AddError(err error, failedSignals ...string) {
 // Category implements [health.Measurement].
 func (NVLinkMeasurement) Category() health.Category { return health.NVLink }
 
+// EntityID implements [health.EntityIdentifier].
+func (m NVLinkMeasurement) EntityID() string { return m.GPUID }
+
 // Errors implements [health.Measurement].
 func (m NVLinkMeasurement) Errors() []health.ErroredMeasurement { return m.errors }
 

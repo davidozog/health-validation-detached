@@ -108,3 +108,20 @@ type UnsupportedSignaler interface {
 type DerivedSignaler interface {
 	DerivedSignals() map[string]any
 }
+
+// EntityIdentifier is an optional interface a measurement may implement
+// to name the entity it describes — a GPU UUID, a device path.
+//
+// Measurements that describe one of several like entities implement it;
+// host-wide ones (CPU, node, journal-derived) do not, because there is no
+// entity to name beyond the node itself. The evaluation engine copies the
+// returned value into a non-PASS verdict's AffectedEntities, which is how a
+// consumer learns which GPU a failing per-GPU check was looking at: the
+// check's own ID and signals are identical across every entity it ran
+// against.
+//
+// Return an empty string when the sensor could not determine the identity;
+// the engine then omits the entity rather than recording a blank one.
+type EntityIdentifier interface {
+	EntityID() string
+}

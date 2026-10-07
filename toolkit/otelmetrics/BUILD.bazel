@@ -21,6 +21,8 @@ go_test(
     srcs = ["publisher_test.go"],
     deps = [
         ":otelmetrics",
+        "//catalog",
+        "//catalog/gpu",
         "//catalog/health",
         "@io_opentelemetry_go_proto_otlp//collector/metrics/v1:metrics",
         "@io_opentelemetry_go_proto_otlp//common/v1:common",

@@ -107,6 +107,9 @@ func (m *GPUMeasurement) AddError(err error, failedSignals ...string) {
 // Category implements [health.Measurement].
 func (GPUMeasurement) Category() health.Category { return health.GPU }
 
+// EntityID implements [health.EntityIdentifier].
+func (m GPUMeasurement) EntityID() string { return m.GPUID }
+
 // Errors implements [health.Measurement].
 func (m GPUMeasurement) Errors() []health.ErroredMeasurement { return m.errors }
 

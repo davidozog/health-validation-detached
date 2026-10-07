@@ -60,7 +60,7 @@ func (e *EvaluationEngine) EvaluateCheck(cd *health.CheckDefinition, m health.Me
 	if !routes(cd, m.Category(), signals) {
 		return skippedVerdict(cd, now, health.NoApplicableMeasurement, noApplicableDetail(cd)), nil
 	}
-	return e.evaluateAgainst(cd, signals, m.Errors(), p, now)
+	return e.evaluateAgainst(cd, signals, m.Errors(), entityID(m), p, now)
 }
 
 // EvaluateBatch routes every measurement to the checks it can feed and
@@ -101,8 +101,11 @@ func (e *EvaluationEngine) EvaluateBatch(checks map[string]*health.CheckDefiniti
 	now := time.Now()
 
 	// Extract each measurement's signals once; every check reuses them.
+	// entity precedes errs to satisfy nogo's pointer-scan metric, not
+	// largest-first ordering.
 	type observed struct {
 		signals  map[string]any
+		entity   string
 		errs     []health.ErroredMeasurement
 		category health.Category
 	}
@@ -110,7 +113,7 @@ func (e *EvaluationEngine) EvaluateBatch(checks map[string]*health.CheckDefiniti
 	presentCategories := make(map[health.Category]bool)
 	for i, m := range measurements {
 		cat := m.Category()
-		obs[i] = observed{ToSignals(m), m.Errors(), cat}
+		obs[i] = observed{ToSignals(m), entityID(m), m.Errors(), cat}
 		presentCategories[cat] = true
 	}
 
@@ -150,7 +153,7 @@ func (e *EvaluationEngine) EvaluateBatch(checks map[string]*health.CheckDefiniti
 			if !routes(cd, o.category, o.signals) {
 				continue
 			}
-			v, err := e.evaluateAgainst(cd, o.signals, o.errs, p, now)
+			v, err := e.evaluateAgainst(cd, o.signals, o.errs, o.entity, p, now)
 			if err != nil {
 				return nil, fmt.Errorf("evaluating %q: %w", id, err)
 			}
@@ -246,8 +249,9 @@ func checkLevelSkip(cd *health.CheckDefinition, p Params, now time.Time) (health
 // evaluateAgainst runs a routed check against one measurement's signals
 // and error list. The caller has already applied [checkLevelSkip] and
 // confirmed the measurement [routes] to the check, so this is the pure
-// data path.
-func (e *EvaluationEngine) evaluateAgainst(cd *health.CheckDefinition, signals map[string]any, errs []health.ErroredMeasurement, p Params, now time.Time) (health.CheckVerdict, error) {
+// data path. entity names the measurement's subject (see
+// [health.EntityIdentifier]) and is empty for host-wide measurements.
+func (e *EvaluationEngine) evaluateAgainst(cd *health.CheckDefinition, signals map[string]any, errs []health.ErroredMeasurement, entity string, p Params, now time.Time) (health.CheckVerdict, error) {
 	// If any of the sensor's per-field failures cover a signal the
 	// check requires, fail the check with a Critical verdict rather
 	// than running CEL against a zero value where a real measurement
@@ -260,7 +264,7 @@ func (e *EvaluationEngine) evaluateAgainst(cd *health.CheckDefinition, signals m
 		// Observation failure: the data was unavailable, so the rules never
 		// ran. The verdict carries a collection-failure action, never the
 		// check's hardware-remediation default (that is for matched rules).
-		return ErroredVerdict(cd, now, detail, action), nil
+		return withEntity(ErroredVerdict(cd, now, detail, action), entity), nil
 	}
 
 	resolved, err := health.ResolveThresholds(cd.ID, cd.Thresholds, p.Overrides, p.Architecture)
@@ -334,7 +338,27 @@ func (e *EvaluationEngine) evaluateAgainst(cd *health.CheckDefinition, signals m
 	v.Thresholds = resolved
 	v.ObservedValues = signals
 	v.RecommendedAction = action
-	return v, nil
+	return withEntity(v, entity), nil
+}
+
+// entityID returns the measurement's subject, or "" when the type does not
+// identify one (host-wide measurements) or the sensor could not determine it.
+func entityID(m health.Measurement) string {
+	id, ok := m.(health.EntityIdentifier)
+	if !ok {
+		return ""
+	}
+	return id.EntityID()
+}
+
+// withEntity names the entity a non-PASS verdict was reached against. A
+// passing verdict names nothing: AffectedEntities is the set a consumer
+// should act on, and every healthy entity in it would be noise.
+func withEntity(v health.CheckVerdict, entity string) health.CheckVerdict {
+	if entity != "" && v.Severity > health.Pass {
+		v.AffectedEntities = []string{entity}
+	}
+	return v
 }
 
 // matchingError inspects the error entries whose FailedSignals overlap the

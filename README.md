@@ -402,7 +402,11 @@ metrics:
 time with the fix spelled out. A URL with no path gets `/v1/metrics` appended;
 an explicit path is used as given. `https` enables TLS.
 
-Six metrics are published per run:
+Six metrics are defined. The four node- and domain-level ones are published
+on every run; the two per-check ones are conditional — `check.skipped` is
+emitted once per skipped check, and `check.affected_entities` once per
+non-passing check that names an entity. A healthy node with nothing skipped
+therefore publishes neither.
 
 | Metric | Type | Value | Attributes |
 |---|---|---|---|

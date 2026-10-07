@@ -15,6 +15,8 @@ import (
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/dsx-ai-factory/health-validation/catalog"
+	"github.com/dsx-ai-factory/health-validation/catalog/gpu"
 	"github.com/dsx-ai-factory/health-validation/catalog/health"
 	"github.com/dsx-ai-factory/health-validation/toolkit/otelmetrics"
 )
@@ -586,5 +588,55 @@ func TestPerEntityResultsDoNotOverwrite(t *testing.T) {
 	entities := cap.metricsByName(t)["health_validation.check.affected_entities"].GetGauge().GetDataPoints()
 	if len(entities) != 1 || entities[0].GetAsInt() != 1 {
 		t.Errorf("affected_entities = %v, want a single point of 1", entities)
+	}
+}
+
+// TestAffectedEntitiesFromRealEvaluation closes the gap that let this metric
+// ship unpublishable: every other test here hand-builds verdicts, so they
+// passed while the evaluation engine never populated AffectedEntities and the
+// real binary emitted five metrics instead of six. This one drives a catalog
+// evaluation end to end.
+func TestAffectedEntitiesFromRealEvaluation(t *testing.T) {
+	cat := catalog.NewEmpty(
+		catalog.WithArchitecture("GB200"),
+		catalog.WithExecutionContext(health.OperatorInfra),
+	)
+	cat.MustRegister(health.CheckDefinition{
+		ID:                "gpu_pstate_probe",
+		Category:          health.GPU,
+		RequiredSignals:   []string{gpu.SignalGPUID, gpu.SignalGPUPstate},
+		ExecutionContexts: []health.ExecutionContext{health.OperatorInfra},
+		Thresholds:        map[string]health.ThresholdSpec{},
+		Rules: []health.Rule{{
+			Expression: "gpu_pstate != 0", Severity: health.Critical, Message: "wrong pstate",
+		}},
+	})
+
+	nv, err := cat.EvaluateAll(
+		gpu.GPUMeasurement{GPUID: "GPU-0", GPUPstate: 0},
+		gpu.GPUMeasurement{GPUID: "GPU-1", GPUPstate: 8},
+	)
+	if err != nil {
+		t.Fatalf("EvaluateAll: %v", err)
+	}
+
+	srv, cap := newCollector(t, http.StatusOK)
+	ctx := context.Background()
+	p, err := otelmetrics.New(ctx, otelmetrics.Options{Endpoint: srv.URL, Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = p.Shutdown(ctx) }()
+	if err := p.Publish(ctx, nv); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	m := cap.metricsByName(t)["health_validation.check.affected_entities"]
+	if m == nil {
+		t.Fatal("affected_entities was not published for a verdict with a failing GPU")
+	}
+	points := m.GetGauge().GetDataPoints()
+	if len(points) != 1 || points[0].GetAsInt() != 1 {
+		t.Errorf("affected_entities = %v, want a single point of 1", points)
 	}
 }
