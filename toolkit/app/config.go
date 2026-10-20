@@ -325,6 +325,31 @@ func coerce(val, ref any) (any, error) {
 			out[i] = value
 		}
 		return out, nil
+	case []float64:
+		// A set-valued numeric threshold, such as the port rates an InfiniBand
+		// port may legitimately report. YAML decodes a mixed list as int and
+		// float64, so each item is widened rather than type-asserted.
+		items, ok := val.([]any)
+		if !ok {
+			return nil, fmt.Errorf("expected a list of numbers, got %T", val)
+		}
+		if len(items) == 0 {
+			return nil, fmt.Errorf("expected a non-empty list of numbers")
+		}
+		out := make([]float64, len(items))
+		for i, item := range items {
+			switch value := item.(type) {
+			case int:
+				out[i] = float64(value)
+			case int64:
+				out[i] = float64(value)
+			case float64:
+				out[i] = value
+			default:
+				return nil, fmt.Errorf("expected a list of numbers, item %d is %T", i, item)
+			}
+		}
+		return out, nil
 	default:
 		// Unknown threshold type: pass the value through unchanged and
 		// let evaluation surface any mismatch.

@@ -4,6 +4,76 @@
 
 InfiniBand covers InfiniBand network health: port state, error rates, and link integrity.
 
+## InfiniBand Port Rate
+
+`ib_port_rate`
+
+Verifies every active InfiniBand or RoCE port reported by sysfs negotiated its expected rate: exactly expected_ib_rate_gbps when the port is unsplit, or one of expected_ib_split_rates_gbps when it is. Fails CRITICAL on a rate no supported division produces, and WARNING on an unsplit port sitting on a legal division — most often an undeclared split rather than a fault.
+
+| Property | Value |
+|---|---|
+| Provenance | <nobr>`nvidia`</nobr> |
+| Condition scope | <nobr>`CLUSTER`</nobr> |
+| Execution class | <nobr>`PASSIVE`</nobr> |
+| Scheduling cadence | <nobr>`CONTINUOUS`</nobr> |
+| Maturity | <nobr>`experimental`</nobr> |
+| Execution contexts | <nobr>`OPERATOR_INFRA`</nobr>, <nobr>`TENANT_GUEST`</nobr> |
+| Architectures | <nobr>`GB200`</nobr>, <nobr>`GB300`</nobr> |
+| Required signals | <nobr>`ib_device`</nobr>, <nobr>`ib_port`</nobr>, <nobr>`ib_state`</nobr>, <nobr>`ib_link_layer`</nobr>, <nobr>`ib_rate_gbps`</nobr> |
+
+**Thresholds**
+
+| Name | Value | Unit | Category | Description |
+|---|---|---|---|---|
+| <nobr>`ethernet_port_split`</nobr> | true | boolean | <nobr>`DEFAULT`</nobr> | Whether Ethernet/RoCE ports are split into multiple logical ports. True (the default, since breakout is the common case there) admits any rate in expected_ib_split_rates_gbps; false requires expected_ib_rate_gbps exactly. |
+| <nobr>`expected_ib_rate_gbps`</nobr> | GB200: 400, GB300: 800, other: 400 | Gb/s | <nobr>`DEFAULT`</nobr> | Rate, in Gb/s, an active unsplit port must report exactly. GB200 ships NDR (400); GB300 ships XDR (800). Applies to a link layer whose port_split threshold is false. |
+| <nobr>`expected_ib_split_rates_gbps`</nobr> | GB200: [400 200 100], GB300: [800 400 200 100], other: [400 200 100] | Gb/s | <nobr>`DEFAULT`</nobr> | Rates, in Gb/s, an active split port may report; anything else fails. Each is the adapter's full rate divided by a supported number of ports. Applies to a link layer whose port_split threshold is true. |
+| <nobr>`expected_ib_state`</nobr> | ACTIVE | state | <nobr>`DEFAULT`</nobr> | Logical port state a port must be in for its rate to be assessed, as sysfs names it. Keep in step with the ib_port_state threshold of the same name. |
+| <nobr>`infiniband_port_split`</nobr> | false | boolean | <nobr>`DEFAULT`</nobr> | Whether native InfiniBand ports are split into multiple logical ports. False (the default) rates them against expected_ib_rate_gbps exactly; true admits any rate in expected_ib_split_rates_gbps. Set true for a fleet that breaks out its fabric ports. |
+
+**Rules**
+
+- **CRITICAL** when `ib_state == expected_ib_state && (ib_link_layer == "InfiniBand" \|\| ib_link_layer == "Ethernet") && !(ib_rate_gbps in expected_ib_split_rates_gbps)`
+  - Message: Port $\{ib_device\}:$\{ib_port\} ($\{ib_link_layer\}): negotiated $\{ib_rate_gbps\} Gb/s, which is not a supported rate for this platform (expected one of $\{expected_ib_split_rates_gbps\} Gb/s).
+- **WARNING** when `ib_state == expected_ib_state && ((ib_link_layer == "InfiniBand" && !infiniband_port_split) \|\| (ib_link_layer == "Ethernet" && !ethernet_port_split)) && ib_rate_gbps != expected_ib_rate_gbps && ib_rate_gbps in expected_ib_split_rates_gbps`
+  - Message: Port $\{ib_device\}:$\{ib_port\} ($\{ib_link_layer\}): negotiated $\{ib_rate_gbps\} Gb/s rather than the full $\{expected_ib_rate_gbps\} Gb/s. That is a supported division of the port rate, so this port is most likely broken out without its link layer's port_split threshold set — set it to confirm, or investigate a link that fell back.
+  - Action: operational state `monitor`
+
+**Recommended action:** operational state `drain`, then `reset_gpu` → `restart_os` → `service_required`
+
+## InfiniBand Port State
+
+`ib_port_state`
+
+Verifies every InfiniBand or RoCE port reported by sysfs is in the expected logical state (ACTIVE) and physical link state (LinkUp). Fails CRITICAL per port that is not.
+
+| Property | Value |
+|---|---|
+| Provenance | <nobr>`nvidia`</nobr> |
+| Condition scope | <nobr>`CLUSTER`</nobr> |
+| Execution class | <nobr>`PASSIVE`</nobr> |
+| Scheduling cadence | <nobr>`CONTINUOUS`</nobr> |
+| Maturity | <nobr>`experimental`</nobr> |
+| Execution contexts | <nobr>`OPERATOR_INFRA`</nobr>, <nobr>`TENANT_GUEST`</nobr> |
+| Architectures | <nobr>`GB200`</nobr>, <nobr>`GB300`</nobr> |
+| Required signals | <nobr>`ib_device`</nobr>, <nobr>`ib_port`</nobr>, <nobr>`ib_state`</nobr>, <nobr>`ib_physical_state`</nobr>, <nobr>`ib_link_layer`</nobr> |
+
+**Thresholds**
+
+| Name | Value | Unit | Category | Description |
+|---|---|---|---|---|
+| <nobr>`expected_ib_physical_state`</nobr> | LinkUp | state | <nobr>`DEFAULT`</nobr> | Physical link state every port must report, as sysfs names it in phys_state. Override per fleet. |
+| <nobr>`expected_ib_state`</nobr> | ACTIVE | state | <nobr>`DEFAULT`</nobr> | Logical port state every port must report, as sysfs names it (the text after the colon in /sys/class/infiniband/&lt;dev>/ports/&lt;n>/state). Override per fleet. |
+
+**Rules**
+
+- **CRITICAL** when `ib_state != expected_ib_state`
+  - Message: Port $\{ib_device\}:$\{ib_port\} ($\{ib_link_layer\}): state $\{ib_state\}, expected $\{expected_ib_state\}.
+- **CRITICAL** when `ib_physical_state != expected_ib_physical_state`
+  - Message: Port $\{ib_device\}:$\{ib_port\} ($\{ib_link_layer\}): physical state $\{ib_physical_state\}, expected $\{expected_ib_physical_state\}.
+
+**Recommended action:** operational state `drain`, then `reset_gpu` → `restart_os` → `service_required`
+
 ## RDMA Link Flap (Fatal)
 
 `rdma_linkflap_fatal`

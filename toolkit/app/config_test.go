@@ -106,6 +106,43 @@ func TestCoerceRejectsInvalidStringList(t *testing.T) {
 	}
 }
 
+// coerce handles []float64 thresholds, the shape ib_port_rate uses to name
+// every rate a platform's split modes may legitimately report. YAML decodes a
+// mixed list as int and float64, so both widen.
+func TestCoerceFloatList(t *testing.T) {
+	got, err := coerce([]any{800, 400, 200.0, 2.5}, []float64{})
+	if err != nil {
+		t.Fatalf("coerce: %v", err)
+	}
+	want := []float64{800, 400, 200, 2.5}
+	if !slices.Equal(got.([]float64), want) {
+		t.Fatalf("float list = %#v, want %#v", got, want)
+	}
+}
+
+// An empty list is rejected rather than silently failing every port: with no
+// valid rates, the membership rule can never match.
+func TestCoerceRejectsInvalidFloatList(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   any
+		wantErr string
+	}{
+		{name: "not a list", value: 400, wantErr: "expected a list of numbers"},
+		{name: "non-number", value: []any{400, "800"}, wantErr: "item 1 is string"},
+		{name: "empty", value: []any{}, wantErr: "non-empty list of numbers"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := coerce(tt.value, []float64{})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestOverridesRejectsBadConfig(t *testing.T) {
 	tests := []struct {
 		name    string

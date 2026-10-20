@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/dsx-ai-factory/health-validation/catalog/health"
+	"github.com/dsx-ai-factory/health-validation/catalog/infiniband"
 	"github.com/dsx-ai-factory/health-validation/collect/observation"
 )
 
@@ -36,8 +37,10 @@ const toolkitSourcePrefix = "toolkit."
 // what the checks consume without depending on canonical collect signal
 // definitions. [ToMeasurements] reverses it.
 //
-// A measurement with a gpu_id targets that GPU; any other measurement
-// targets the node, or carries no target when nodeID is empty. Scalar
+// A measurement with a gpu_id targets that GPU, one with ib_device and
+// ib_port targets that InfiniBand port (or the device, for port 0); any
+// other measurement targets the node, or carries no target when nodeID is
+// empty. Scalar
 // fields keep their type; maps, slices, and structs are encoded as a JSON
 // string. A field named by a measurement error becomes a CollectionError,
 // and one the source reported unsupported becomes a NoValue, so a zero
@@ -121,18 +124,36 @@ func export(source, nodeID string, at *timestamppb.Timestamp, m health.Measureme
 	return out, nil
 }
 
-// measurementTarget returns the GPU a measurement describes, or the node for
-// a host-wide measurement. A failed GPU identity lookup leaves gpu_id as a
-// placeholder rather than a UUID, so that measurement carries no target.
+// measurementTarget returns the GPU or InfiniBand port a measurement
+// describes, or the node for a host-wide measurement. A failed GPU identity
+// lookup leaves gpu_id as a placeholder rather than a UUID, and an
+// unidentified port leaves ib_device empty, so that measurement carries no
+// target.
 func measurementTarget(v reflect.Value, nodeID string, failures map[string][]error) *observation.ObservationTarget {
+	fields := make(map[string]reflect.Value)
 	for i := range v.NumField() {
-		if name, ok := signalName(v.Type().Field(i)); !ok || name != gpuIDField || v.Field(i).Kind() != reflect.String {
-			continue
+		if name, ok := signalName(v.Type().Field(i)); ok {
+			fields[name] = v.Field(i)
 		}
-		if gpuID := v.Field(i).String(); gpuID != "" && len(failures[gpuIDField]) == 0 {
-			return observation.GPUTarget(gpuID)
+	}
+	if gpuID, ok := fields[gpuIDField]; ok && gpuID.Kind() == reflect.String {
+		if id := gpuID.String(); id != "" && len(failures[gpuIDField]) == 0 {
+			return observation.GPUTarget(id)
 		}
 		return nil
+	}
+	device, hasDevice := fields[infiniband.SignalIBDevice]
+	port, hasPort := fields[infiniband.SignalIBPort]
+	if hasDevice && hasPort && device.Kind() == reflect.String && port.CanInt() {
+		name := device.String()
+		switch n := port.Int(); {
+		case name == "":
+			return nil
+		case n > 0 && n <= math.MaxUint32:
+			return observation.InfiniBandPortTarget(name, uint32(n))
+		}
+		// Port 0 describes the device, as when its ports could not be listed.
+		return observation.InfiniBandDeviceTarget(name)
 	}
 	if nodeID == "" {
 		return nil

@@ -214,6 +214,8 @@ The catalog includes these check families:
 | `nvlink_capabilities` | nvlink | Whether each GPU reports its expected NVLink capabilities | None |
 | `nvlink_p2p` | nvlink | Peer GPUs reachable over NVLink P2P | `max_unhealthy_p2p_peers` |
 | `rdma_linkflap_fatal` | infiniband | mlx5 RDMA link outages that stayed down past a window | `min_outage_seconds`, `fatal_flap_threshold` |
+| `ib_port_state` | infiniband | Whether every InfiniBand or RoCE port is ACTIVE with its link up | `expected_ib_state`, `expected_ib_physical_state` |
+| `ib_port_rate` | infiniband | Whether every active port negotiated its platform's rate, or a legal split of it | `expected_ib_rate_gbps`, `expected_ib_split_rates_gbps`, `infiniband_port_split`, `ethernet_port_split`, `expected_ib_state` |
 | `gpu_xid_<code>` | xid | One CRITICAL check per critical Xid code seen in the journal | None |
 | `gpu_xid_149_<hex>` | xid | One check per Xid 149 NETIR_LINK_EVT/NETIR_LINK_DOWN subtype NVIDIA's decode table distinguishes | None |
 | `gpu_xid_warning` | xid | Consolidated WARNING check for warning-class Xid codes | None |
